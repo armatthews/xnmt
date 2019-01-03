@@ -293,8 +293,8 @@ class SyntaxTree(Sentence):
 
   def __repr__(self):
     if len(self.children) == 0:
-      return self.label
-    return '(%s %s)' % (self.label, ' '.join(repr(child) for child in self.children))
+      return str(self.label)
+    return '(%d %s)' % (self.label, ' '.join(repr(child) for child in self.children))
 
   def __str__(self):
     return repr(self)
@@ -309,14 +309,15 @@ class SyntaxTree(Sentence):
   def from_string(line, nt_vocab, term_vocab, idx=None, depth=0):
     line = line.strip()
     if line.startswith('( ') and line.endswith(' )'):
-      # Berkeley Parser likes to add an extra layer of parents
+      # Berkeley Parser likes to add an extra layer of parens
       # separate by spaces for whatever reason.
       line = line[2:-2]
 
     # if it's a terminal
     if not line.startswith('('):
       assert ' ' not in line
-      return SyntaxTree(line, [], idx)
+      label = term_vocab.convert(line)
+      return SyntaxTree(label, [], idx)
     else:
       assert line.endswith(')')
       line = line[1:-1]
@@ -356,6 +357,8 @@ class SyntaxTree(Sentence):
     for child in child_strings:
       child_node = SyntaxTree.from_string(child, nt_vocab, term_vocab, depth=depth+1)
       children.append(child_node)
+    assert len(children) > 0
+    label = nt_vocab.convert(label)
     return SyntaxTree(label, children, idx)
 
 
@@ -364,7 +367,20 @@ class SyntaxTree(Sentence):
     raise NotImplementedError()
 
   def __getitem__(self, key):
-    raise NotImplementedError()
+    assert key < self.sent_len()
+
+    if len(self.children) == 0:
+      assert key == 0
+      return self.label
+
+    n = 0
+    for child in self.children:
+      child_len = child.sent_len()
+      if key < n + child_len:
+        return child[key - n]
+      else:
+        n += child_len
+    assert False 
 
   def get_padded_sent(self, token, pad_len):
     raise NotImplementedError()
@@ -372,6 +388,26 @@ class SyntaxTree(Sentence):
   def get_truncated_sent(self, trunc_len: int) -> 'Input':
     raise NotImplementedError()
 
+class RnngSentence(ReadableSentence):
+  def __init__(self, words, vocab, idx=None, score=None):
+    super().__init__(idx, score) 
+    self.words = words
+    self.vocab = vocab
+
+  def __getitem__(self, key):
+    ret = self.words[key]
+    if isinstance(ret, list):  # support for slicing
+      return RnngSentence(words=ret, vocab=self.vocab, idx=self.idx, score=self.score)
+    return ret 
+
+  def sent_len(self):
+    return len(self.words)
+
+  def str_tokens(self, **kwargs) -> List[str]:
+    return [self.vocab[w] for w in self.words]
+
+  def len_unpadded(self):
+    return len(self.words)
 
 class SegmentedSentence(SimpleSentence):
   def __init__(self, segment=[], **kwargs) -> None:

@@ -13,7 +13,6 @@ with warnings.catch_warnings():
   import h5py
 
 from xnmt import logger
-
 from xnmt import batchers, output, sent, events, vocabs
 from xnmt.persistence import serializable_init, Serializable
 
@@ -473,7 +472,6 @@ class IDReader(BaseTextReader, Serializable):
   def read_sents(self, filename: str, filter_ids: Optional[Sequence[numbers.Integral]] = None) -> list:
     return [l for l in self.iterate_filtered(filename, filter_ids)]
 
-<<<<<<< HEAD
 class SyntaxTreeReader(BaseTextReader, Serializable):
   """
   Reads in syntax trees, one per line, and converts them into xnmt Input objects.
@@ -490,10 +488,7 @@ class SyntaxTreeReader(BaseTextReader, Serializable):
     assert self.nt_vocab is not None
     assert self.term_vocab is not None
     tree = sent.SyntaxTree.from_string(line, self.nt_vocab, self.vocab, idx)
-    import sys
-    print('Read tree:', tree, file=sys.__stdout__)
     return tree
-=======
 
 class LatticeReader(BaseTextReader, Serializable):
   """
@@ -562,7 +557,20 @@ class LatticeReader(BaseTextReader, Serializable):
   def vocab_size(self):
     return len(self.vocab)
 
->>>>>>> 69fb6361a621dd4e1c7dd4d7c9308245c8aa06cd
+class RnngReader(BaseTextReader, Serializable):
+  """
+  Reads syntax trees encoded as RNNG actions
+  """
+  yaml_tag = "!RnngReader"
+
+  @serializable_init
+  def __init__(self, vocab):
+    self.vocab = vocab
+    self.output_procs = None
+
+  def read_sent(self, line, idx):
+    words = [self.vocab.convert(word) for word in line.strip().split()]
+    return sent.RnngSentence(words=words, vocab=self.vocab)
 
 ###### A utility function to read a parallel corpus
 def read_parallel_corpus(src_reader: InputReader,

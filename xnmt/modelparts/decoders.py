@@ -7,6 +7,7 @@ from xnmt import batchers, param_collections
 from xnmt.modelparts import bridges, transforms, scorers, embedders
 from xnmt.transducers import recurrent
 from xnmt.persistence import serializable_init, Serializable, bare, Ref
+from xnmt.vocabs import RnngVocab
 
 class Decoder(object):
   """
@@ -156,3 +157,268 @@ class AutoRegressiveDecoder(Decoder, Serializable):
   def calc_loss(self, mlp_dec_state, ref_action):
     return self.scorer.calc_loss(self._calc_transform(mlp_dec_state), ref_action)
 
+class RnngAction:
+  SHIFT = 0
+  NT = 1
+  REDUCE = 2
+
+  def __init__(self, action_type=None, subtype=None):
+    self.action_type = action_type
+    self.subtype = subtype
+
+  @staticmethod
+  def from_index(index):
+    pass
+
+  def get_index(self):
+    pass
+
+class RnngDecoderState(object):
+  MaxOpenNTs = 100
+
+  def __init__(self, hidden_dim):
+    self.stack = [] # Subtree embeddings
+    self.terminals = [] # Generated terminals
+    self.is_open_paren = [] # -1 if no non-terminal has a paren open, otherwise index of NT
+    self.num_open_parens = 0
+    self.prev_action = None
+
+    self.stack_lstm_pointer = None
+    self.term_lstm_pointer = None
+    self.action_lstm_pointer = None
+
+    self.stack_emb = dy.zeros(hidden_dim)
+
+  def is_forbidden(self, action):
+    return False
+
+  def as_vector(self):
+    return self.stack_emb
+
+class RnngDecoder(Decoder, Serializable):
+  yaml_tag = "!RnngDecoder"
+
+  @serializable_init
+  def __init__(self, input_dim = Ref("exp_global.default_layer_dim"),
+               hidden_dim = Ref("exp_global.default_layer_dim"),
+               dropout = 0.0, action_scorer=None,
+               term_scorer = bare(scorers.Softmax), nt_scorer = bare(scorers.Softmax),
+               bridge: bridges.Bridge = bare(bridges.CopyBridge),
+               vocab=None, nt_vocab=None,
+               stack_lstm=None, comp_lstm_fwd=None, comp_lstm_rev=None,
+               compose_transform=None, state_transform=None):
+
+    #model = param_collections.ParamManager.my_params(self)
+    self.input_dim = input_dim
+    self.hidden_dim = hidden_dim
+    self.dropout = dropout
+    self.action_scorer = self.add_serializable_component(
+        'action_scorer', action_scorer,
+        lambda: scorers.Softmax(input_dim, vocab_size=RnngVocab.NUM_ACTIONS))
+    self.term_scorer = term_scorer
+    self.nt_scorer = nt_scorer
+    self.bridge = bridge
+
+    # LSTMs
+    self.stack_lstm = self.add_serializable_component('stack_lstm', stack_lstm,
+        lambda: recurrent.UniLSTMSeqTransducer(input_dim=input_dim,
+                                               hidden_dim=hidden_dim,
+                                               dropout=dropout))
+    self.comp_lstm_fwd = self.add_serializable_component(
+        'comp_lstm_fwd', comp_lstm_fwd,
+        lambda: recurrent.UniLSTMSeqTransducer(
+        input_dim=input_dim, hidden_dim=hidden_dim, dropout=dropout))
+    self.comp_lstm_rev = self.add_serializable_component(
+        'comp_lstm_rev', comp_lstm_rev,
+        lambda: recurrent.UniLSTMSeqTransducer(
+        input_dim=input_dim, hidden_dim=hidden_dim, dropout=dropout))
+
+    # Embedding Tables
+    # Is this the right place for these to live??
+    #term_embs
+    #nt_embs # non-terminal embeddings when pushed to the stack as part of the NT action
+    #nt_embs_up # non-terminal embeddings when used in a composed representation
+
+    # parameters
+    # Composed representation of a treelet is composed as follows:
+    # f = LSTM(label + children)
+    # r = LSTM(label + children[::-1])
+    # final = tanh(w * [f; r] + b) = tanh(linear([f; r]))
+    self.compose_transform = self.add_serializable_component(
+        'compose_transform', compose_transform,
+        lambda: transforms.NonLinear(hidden_dim, hidden_dim))
+
+    # The parser state is computed as
+    # tanh(W * [s; w] + b)
+    # where s is the output of the stack LSTM
+    # and w is the source context
+    self.state_transform = self.add_serializable_component(
+        'state_transform', state_transform,
+        lambda: transforms.NonLinear(bridge.dec_dim + hidden_dim, hidden_dim))
+
+    # Why do we need a stack guard, exactly??
+    #stack_guard # end of stack
+
+    #nt_vocab_size
+    pass
+
+  def calc_loss(self, dec_state, ref_action):
+    assert type(ref_action) == batchers.ListBatch
+    assert len(ref_action) == 1
+    ref_action = ref_action[0]
+
+    action_log_probs = self.action_scorer.calc_log_probs(dec_state.as_vector())
+    action_log_prob = dy.pick(action_log_probs, ref_action[0])
+    log_prob = action_log_prob
+    if ref_action[0] == RnngAction.SHIFT:
+      term_log_probs = self.term_scorer.calc_log_probs(dec_state.as_vector())
+      term_log_prob = dy.pick(term_log_probs, ref_action[1])
+      log_prob += term_log_prob
+    elif ref_action[0] == RnngAction.NT:
+      nt_log_probs = self.nt_scorer.calc_log_probs(dec_state.as_vector())
+      nt_log_prob = dy.pick(nt_log_probs, ref_action[1])
+      log_prob += nt_log_prob
+    return -log_prob
+
+  def calc_log_probs(self, dec_state):
+    pass
+
+  def calc_score(self, calc_scores_logsoftmax):
+    pass
+
+  def calc_prob(self, calc_scores_logsoftmax):
+    pass
+
+  def calc_log_prob(self, calc_scores_logsoftmax):
+    pass
+
+  def perform_shift(self, dec_state, word_id):
+    pass
+
+  def perform_nt(self, dec_state, nt_id):
+    pass
+
+  def perform_reduce(self, dec_state):
+    pass
+
+  def add_input(self, dec_state, word):
+    print('Adding input: ' + str(word) + ' ' + str(type(word)))
+    raise Exception()
+    return self.initial_state(None, None)
+
+  def initial_state(self, enc_final_states, ss_expr):
+    return RnngDecoderState(self.hidden_dim)
+
+# TODO: This should be factored to simply use Softmax
+# class AutoRegressiveLexiconDecoder(AutoRegressiveDecoder, Serializable):
+#   yaml_tag = '!AutoRegressiveLexiconDecoder'
+# 
+#   @register_xnmt_handler
+#   @serializable_init
+#   def __init__(self,
+#                input_dim=Ref("exp_global.default_dim"),
+#                trg_embed_dim=Ref("exp_global.default_dim"),
+#                input_feeding=True,
+#                rnn=bare(UniLSTMSeqTransducer),
+#                mlp=bare(AttentionalOutputMLP),
+#                bridge=bare(CopyBridge),
+#                label_smoothing=0.0,
+#                lexicon_file=None,
+#                src_vocab=Ref(Path("model.src_reader.vocab")),
+#                trg_vocab=Ref(Path("model.trg_reader.vocab")),
+#                attender=Ref(Path("model.attender")),
+#                lexicon_type='bias',
+#                lexicon_alpha=0.001,
+#                linear_projector=None,
+#                truncate_dec_batches: bool = Ref("exp_global.truncate_dec_batches", default=False),
+#                param_init_lin=Ref("exp_global.param_init", default=bare(GlorotInitializer)),
+#                bias_init_lin=Ref("exp_global.bias_init", default=bare(ZeroInitializer)),
+#                ) -> None:
+#     super().__init__(input_dim, trg_embed_dim, input_feeding, rnn,
+#                      mlp, bridge, truncate_dec_batches, label_smoothing)
+#     assert lexicon_file is not None
+#     self.lexicon_file = lexicon_file
+#     self.src_vocab = src_vocab
+#     self.trg_vocab = trg_vocab
+#     self.attender = attender
+#     self.lexicon_type = lexicon_type
+#     self.lexicon_alpha = lexicon_alpha
+# 
+#     self.linear_projector = self.add_serializable_component("linear_projector", linear_projector,
+#                                                              lambda: xnmt.linear.Linear(input_dim=input_dim,
+#                                                                                         output_dim=mlp.output_dim))
+# 
+#     if self.lexicon_type == "linear":
+#       self.lexicon_method = self.linear
+#     elif self.lexicon_type == "bias":
+#       self.lexicon_method = self.bias
+#     else:
+#       raise ValueError("Unrecognized lexicon method:", lexicon_type, "can only choose between [bias, linear]")
+# 
+#   def load_lexicon(self):
+#     logger.info("Loading lexicon from file: " + self.lexicon_file)
+#     assert self.src_vocab.frozen
+#     assert self.trg_vocab.frozen
+#     lexicon = [{} for _ in range(len(self.src_vocab))]
+#     with open(self.lexicon_file, encoding='utf-8') as fp:
+#       for line in fp:
+#         try:
+#           trg, src, prob = line.rstrip().split()
+#         except:
+#           logger.warning("Failed to parse 'trg src prob' from:" + line.strip())
+#           continue
+#         trg_id = self.trg_vocab.convert(trg)
+#         src_id = self.src_vocab.convert(src)
+#         lexicon[src_id][trg_id] = float(prob)
+#     # Setting the rest of the weight to the unknown word
+#     for i in range(len(lexicon)):
+#       sum_prob = sum(lexicon[i].values())
+#       if sum_prob < 1.0:
+#         lexicon[i][self.trg_vocab.convert(self.trg_vocab.unk_token)] = 1.0 - sum_prob
+#     # Overriding special tokens
+#     src_unk_id = self.src_vocab.convert(self.src_vocab.unk_token)
+#     trg_unk_id = self.trg_vocab.convert(self.trg_vocab.unk_token)
+#     lexicon[self.src_vocab.SS] = {self.trg_vocab.SS: 1.0}
+#     lexicon[self.src_vocab.ES] = {self.trg_vocab.ES: 1.0}
+#     # TODO(philip30): Note sure if this is intended
+#     lexicon[src_unk_id] = {trg_unk_id: 1.0}
+#     return lexicon
+# 
+#   @handle_xnmt_event
+#   def on_new_epoch(self, training_task, *args, **kwargs):
+#     if hasattr(self, "lexicon_prob"):
+#       del self.lexicon_prob
+#     if not hasattr(self, "lexicon"):
+#       self.lexicon = self.load_lexicon()
+# 
+#   @handle_xnmt_event
+#   def on_start_sent(self, src):
+#     batch_size = len(src)
+#     col_size = len(src[0])
+# 
+#     idxs = [(x, j, i) for i in range(batch_size) for j in range(col_size) for x in self.lexicon[src[i][j]].keys()]
+#     idxs = tuple(map(list, list(zip(*idxs))))
+# 
+#     values = [x for i in range(batch_size) for j in range(col_size) for x in self.lexicon[src[i][j]].values()]
+#     self.lexicon_prob = dy.nobackprop(dy.sparse_inputTensor(idxs, values, (len(self.trg_vocab), col_size, batch_size), batched=True))
+#     
+#   def calc_scores_logsoftmax(self, mlp_dec_state):
+#     score = super().calc_scores(mlp_dec_state)
+#     lex_prob = self.lexicon_prob * self.attender.get_last_attention()
+#     # Note that the sum dim is only summing a tensor of 1 size in dim 1.
+#     # This is to make sure that the shape of the returned tensor matches the vanilla decoder
+#     return dy.sum_dim(self.lexicon_method(mlp_dec_state, score, lex_prob), [1])
+# 
+#   def linear(self, mlp_dec_state, score, lex_prob):
+#     coef = dy.logistic(self.linear_projector(mlp_dec_state.rnn_state.output()))
+#     return dy.log(dy.cmult(dy.softmax(score), coef) + dy.cmult((1-coef), lex_prob))
+# 
+#   def bias(self, mlp_dec_state, score, lex_prob):
+#     return dy.log_softmax(score + dy.log(lex_prob + self.lexicon_alpha))
+# 
+#   def calc_loss(self, mlp_dec_state, ref_action):
+#     logsoft = self.calc_scores_logsoftmax(mlp_dec_state)
+#     if not xnmt.batcher.is_batched(ref_action):
+#       return -dy.pick(logsoft, ref_action)
+#     else:
+#       return -dy.pick_batch(logsoft, ref_action)

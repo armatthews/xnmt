@@ -56,6 +56,7 @@ import xnmt.transducers.recurrent
 import xnmt.transducers.residual
 import xnmt.transducers.self_attention
 import xnmt.transformer
+import xnmt.vocabs
 
 
 resolved_serialize_params = {}

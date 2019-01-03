@@ -1,3 +1,4 @@
+import sys
 import dynet as dy
 import numpy as np
 import collections
@@ -131,8 +132,13 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
     for i in range(seq_len):
       ref_word = DefaultTranslator._select_ref_words(trg, i, truncate_masked=self.truncate_dec_batches)
 
+      if self.truncate_dec_batches and batchers.is_batched(ref_word):
+        assert False, 'wtf'
+        dec_state.rnn_state, ref_word = batchers.truncate_batches(dec_state.rnn_state, ref_word)
+
       if input_word is not None:
-        dec_state = self.decoder.add_input(dec_state, input_word)
+        dec_state = self.decoder.add_input(dec_state, self.trg_embedder.embed(input_word))
+
       rnn_output = dec_state.as_vector()
       dec_state.context = self.attender.calc_context(rnn_output)
       word_loss = self.decoder.calc_loss(dec_state, ref_word)
