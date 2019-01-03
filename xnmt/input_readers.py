@@ -473,6 +473,24 @@ class IDReader(BaseTextReader, Serializable):
   def read_sents(self, filename: str, filter_ids: Optional[Sequence[numbers.Integral]] = None) -> list:
     return [l for l in self.iterate_filtered(filename, filter_ids)]
 
+class SyntaxTreeReader(BaseTextReader, Serializable):
+  """
+  Reads in syntax trees, one per line, and converts them into xnmt Input objects.
+  """
+  yaml_tag = "!SyntaxTreeReader"
+
+  @serializable_init
+  def __init__(self, nt_vocab, term_vocab):
+    self.nt_vocab = nt_vocab
+    self.vocab = term_vocab
+    self.output_procs = None
+
+  def read_sent(self, line, idx):
+    assert self.nt_vocab is not None
+    assert self.term_vocab is not None
+    tree = sent.SyntaxTree.from_string(line, self.nt_vocab, self.vocab, idx)
+    return tree
+
 class LatticeReader(BaseTextReader, Serializable):
   """
   Reads lattices from a text file.
@@ -558,6 +576,21 @@ class SyntaxTreeReader(BaseTextReader, Serializable):
     tree = SyntaxTree.from_string(line, self.nt_vocab, self.vocab, idx)
     import sys
     return tree
+
+class RnngReader(BaseTextReader, Serializable):
+  """
+  Reads syntax trees encoded as RNNG actions
+  """
+  yaml_tag = "!RnngReader"
+
+  @serializable_init
+  def __init__(self, vocab):
+    self.vocab = vocab
+    self.output_procs = None
+
+  def read_sent(self, line, idx):
+    words = [self.vocab.convert(word) for word in line.strip().split()]
+    return sent.RnngSentence(words=words, vocab=self.vocab)
 
 ###### A utility function to read a parallel corpus
 def read_parallel_corpus(src_reader: InputReader,

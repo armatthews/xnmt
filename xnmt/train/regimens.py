@@ -4,6 +4,7 @@ from collections import OrderedDict
 import numbers
 
 from xnmt.settings import settings
+import sys
 import numpy as np
 import dynet as dy
 

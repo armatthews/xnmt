@@ -1,4 +1,5 @@
 from typing import Any, List, Optional, Sequence
+from collections import namedtuple
 import numbers
 
 from xnmt.persistence import serializable_init, Serializable
@@ -94,3 +95,63 @@ class Vocab(Serializable):
     if self.unk_token != other.unk_token:
       return False
     return self.w2i == other.w2i
+
+RnngAction = namedtuple('RnngAction', 'action,subaction')
+
+class RnngVocab(Serializable):
+  yaml_tag = '!RnngVocab'
+  NONE = 0
+  SHIFT = 1
+  NT = 2
+  REDUCE = 3
+  NUM_ACTIONS = 4
+
+  @serializable_init
+  def __init__(self, term_vocab=None, nt_vocab=None):
+    self.term_vocab = term_vocab if term_vocab is not None else Vocab()
+    self.nt_vocab = nt_vocab if nt_vocab is not None else Vocab()
+
+  @staticmethod
+  def from_vocab_files(term_vocab_file, nt_vocab_file,
+                       sentencepiece_vocab=False):
+    term_vocab = Vocab(term_vocab_file=term_vocab_file,
+                       sentencepiece_vocab=sentencepiece_vocab)
+    nt_vocab = Vocab(vocab_file=nt_vocab_file)
+    return RnngVocab(term_vocab, nt_vocab)
+
+  def convert(self, word):
+    if word == 'REDUCE':
+      return RnngAction(RnngVocab.REDUCE, None)
+    elif word.startswith('NT(') and word.endswith(')'):
+      nt = word.split('(', 1)[1][:-1]
+      return RnngAction(RnngVocab.NT, self.nt_vocab.convert(nt))
+    elif word.startswith('SHIFT(') and word.endswith(')'):
+      term = word.split('(', 1)[1][:-1]
+      return RnngAction(RnngVocab.SHIFT, self.term_vocab.convert(term))
+    else:
+      raise 'Invalid RNNG input word: %s. Should be one of SHIFT(terminal), NT(non-terminal), or REDUCE'
+
+  def __getitem__(self, i):
+    assert isinstance(i, RnngAction)
+    assert len(i) == 2
+
+    if i[0] == RnngVocab.NONE:
+      return 'NONE'
+    elif i[0] == RnngVocab.SHIFT:
+      return 'SHIFT(%s)' % self.term_vocab[i[1]]
+    elif i[0] == RnngVocab.NT:
+      return 'NT(%s)' % self.nt_vocab[i[1]]
+    elif i[0] == RnngVocab.REDUCE:
+      return 'REDUCE'
+    raise Exception('Unknown RNNG action: %s' % str(i))
+
+  def __len__(self):
+    return len(self.term_vocab) + len(self.nt_vocab)
+
+  def is_compatible(self, other):
+    if not isinstance(other, RnngVocab):
+      return False
+    if not self.term_vocab.is_compatible(other.term_vocab):
+      return False
+    if not self.nt_vocab.is_compatible(other.nt_vocab):
+      return False

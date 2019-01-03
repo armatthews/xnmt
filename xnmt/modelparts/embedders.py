@@ -2,13 +2,15 @@ import numbers
 from typing import Any, Optional, Union
 import io
 
+import sys
 import numpy as np
 import dynet as dy
 
 from xnmt import logger
 from xnmt import batchers, events, expression_seqs, input_readers, param_collections, param_initializers, sent, vocabs
 from xnmt.modelparts import transforms
-from xnmt.persistence import bare, Path, Ref, Serializable, serializable_init
+from xnmt.persistence import serializable_init, Serializable, Ref, Path, bare
+from xnmt.vocabs import RnngVocab
 
 class Embedder(object):
   """
@@ -450,3 +452,102 @@ class PositionEmbedder(Embedder, Serializable):
   def embed_sent(self, sent_len: numbers.Integral) -> expression_seqs.ExpressionSequence:
     embeddings = dy.strided_select(dy.parameter(self.embeddings), [1,1], [0,0], [self.emb_dim, sent_len])
     return expression_seqs.ExpressionSequence(expr_tensor=embeddings, mask=None)
+
+class EmbeddedSyntaxTree:
+  def __init__(self, label, children):
+    self.label = label
+    self.children = children
+
+class SyntaxTreeEmbedder(Embedder, Serializable):
+
+  yaml_tag = '!SyntaxTreeEmbedder'
+
+  @serializable_init
+  def __init__(self,
+               emb_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(
+                 param_initializers.GlorotInitializer)),
+               nt_vocab_size: Optional[numbers.Integral] = None,
+               term_vocab_size: Optional[numbers.Integral] = None,
+               yaml_path=None,
+               src_reader: Optional[input_readers.InputReader] = Ref("model.src_reader", default=None),
+               trg_reader: Optional[input_readers.InputReader] = Ref("model.trg_reader", default=None)) -> None:
+    self.emb_dim = emb_dim
+    self.train = False
+    param_collection = param_collections.ParamManager.my_params(self)
+    self.nt_vocab_size = len(src_reader.nt_vocab) if not nt_vocab_size else nt_vocab_size
+    self.term_vocab_size = len(src_reader.term_vocab) if not term_vocab_size else term_vocab_size
+    self.save_processed_arg("nt_vocab_size", self.nt_vocab_size)
+    self.save_processed_arg("term_vocab_size", self.term_vocab_size)
+    self.nt_embeddings = param_collection.add_lookup_parameters((self.nt_vocab_size, self.emb_dim),
+                             init=param_init.initializer((self.nt_vocab_size, self.emb_dim), is_lookup=True))
+    self.term_embeddings = param_collection.add_lookup_parameters((self.term_vocab_size, self.emb_dim),
+                               init=param_init.initializer((self.term_vocab_size, self.emb_dim), is_lookup=True))
+
+  @events.handle_xnmt_event
+  def on_set_train(self, val):
+    self.train = val
+
+  @events.handle_xnmt_event
+  def on_start_sent(self, src):
+    self.word_id_mask = None
+
+  def embed_single_sent(self, tree) -> EmbeddedSyntaxTree:
+    children = [self.embed_single_sent(child) for child in tree.children]
+    embs = self.nt_embeddings if len(children) > 0 else self.term_embeddings
+    label = embs[tree.label]
+    emb_tree = EmbeddedSyntaxTree(label, children)
+    return emb_tree
+
+  def embed_sent(self, tree) -> EmbeddedSyntaxTree:
+    batched = batchers.is_batched(tree)
+    if not batched:
+      return self.embed_single_sent(tree)
+    else:
+      return [self.embed_single_sent(t) for t in tree]
+
+class RnngEmbedder(Embedder, Serializable):
+  yaml_tag = '!RnngEmbedder'
+
+  @serializable_init
+  def __init__(self, term_emb, nt_emb, vocab):
+    self.term_emb = term_emb
+    self.nt_emb = nt_emb
+    self.vocab = vocab
+
+  @events.handle_xnmt_event
+  def on_set_train(self, val):
+    self.train = val
+
+  @events.handle_xnmt_event
+  def on_start_sent(self, src):
+    self.word_id_mask = None
+
+  def embed(self, word):
+    if type(word) != tuple or len(word) != 2:
+      return dy.zeros(self.term_emb.emb_dim)
+    action, wid = word
+    emb = None
+    if action == RnngVocab.NONE:
+      assert wid == None
+    elif action == RnngVocab.SHIFT:
+      emb = term_emb.embed(wid)
+    elif action == RnngVocab.NT:
+      emb = nt_emb.embed(wid)
+    elif action == RnngVocab.REDUCE:
+      assert wid == None
+    else:
+      assert False
+    return (action, emb)
+
+
+  def embed_single_sent(self, sent):
+    embs = [self.embed(word) for word in sent]
+    return embs
+
+  def embed_sent(self, sents):
+    batched = batchers.is_batched(sents)
+    if not batched:
+      return self.embed_single_sent(sents)
+    else:
+      return [self.embed_single_sent(sent) for sent in sents]

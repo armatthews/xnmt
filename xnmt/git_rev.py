@@ -1,1 +1,1 @@
-CUR_GIT_REVISION = None
+CUR_GIT_REVISION = "03f95d3" # via setup.py

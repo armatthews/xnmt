@@ -2,10 +2,13 @@ import numbers
 import collections.abc
 from typing import List, Optional, Sequence, Tuple, Union
 
+import sys
 import numpy as np
 import dynet as dy
 
+
 from xnmt import expression_seqs, param_collections, param_initializers
+from xnmt.modelparts import transforms
 from xnmt.events import register_xnmt_handler, handle_xnmt_event
 from xnmt.transducers import base as transducers
 from xnmt.persistence import bare, Ref, Serializable, serializable_init, Path
@@ -384,3 +387,164 @@ class CustomLSTMSeqTransducer(transducers.SeqTransducer, Serializable):
       h.append(dy.cmult(i_ot, dy.tanh(c[-1])))
     return h
 
+from xnmt.sent import SyntaxTree
+class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
+  """
+  Args:
+    layers (int): number of layers
+    input_dim (int): input dimension
+    hidden_dim (int): hidden dimension
+    dropout (float): dropout probability
+    weightnoise_std (float): weight noise standard deviation
+    param_init: a :class:`xnmt.param_init.ParamInitializer` or list of :class:`xnmt.param_init.ParamInitializer` objects 
+                specifying how to initialize weight matrices. If a list is given, each entry denotes one layer.
+    bias_init: a :class:`xnmt.param_init.ParamInitializer` or list of :class:`xnmt.param_init.ParamInitializer` objects
+               specifying how to initialize bias vectors. If a list is given, each entry denotes one layer.
+  """
+  yaml_tag = '!SyntaxTreeEncoder'
+
+  @register_xnmt_handler
+  @serializable_init
+  def __init__(self,
+               layers=1,
+               input_dim=Ref("exp_global.default_layer_dim"),
+               hidden_dim=Ref("exp_global.default_layer_dim"),
+               dropout=Ref("exp_global.dropout", default=0.0),
+               weightnoise_std=Ref("exp_global.weight_noise", default=0.0),
+               param_init=Ref("exp_global.param_init", default=bare(GlorotInitializer)),
+               bias_init=Ref("exp_global.bias_init", default=bare(ZeroInitializer)),
+               inside_fwd_layers=None, inside_rev_layers=None,
+               outside_left_layers=None, outside_right_layers=None, mlps=None):
+    self.num_layers = layers
+    assert input_dim == hidden_dim, 'To get this to work without input_dim == hidden_dim, I will need to add a linear transform for all the inputs.'
+    self.hidden_dim = hidden_dim
+    self.dropout_rate = dropout
+    self.weightnoise_std = weightnoise_std
+    assert hidden_dim % 2 == 0
+    self.inside_fwd_layers = self.add_serializable_component("inside_fwd_layers", inside_fwd_layers, lambda: [
+      UniLSTMSeqTransducer(input_dim=input_dim if i == 0 else hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
+                           weightnoise_std=weightnoise_std,
+                           param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
+                           bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in
+      range(layers)])
+
+    self.inside_rev_layers = self.add_serializable_component("inside_rev_layers", inside_rev_layers, lambda: [
+      UniLSTMSeqTransducer(input_dim=input_dim if i == 0 else hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
+                           weightnoise_std=weightnoise_std,
+                           param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
+                           bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in
+      range(layers)])
+
+    self.outside_left_layers = self.add_serializable_component("outside_left_layers", outside_left_layers, lambda: [
+      UniLSTMSeqTransducer(input_dim=input_dim if i == 0 else hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
+                           weightnoise_std=weightnoise_std,
+                           param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
+                           bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in
+      range(layers)])
+
+    self.outside_right_layers = self.add_serializable_component("outside_right_layers", outside_right_layers, lambda: [
+      UniLSTMSeqTransducer(input_dim=input_dim if i == 0 else hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
+                           weightnoise_std=weightnoise_std,
+                           param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
+                           bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in
+      range(layers)])
+
+    self.mlps = self.add_serializable_component('mlps', mlps, lambda: [transforms.MLP(input_dim=3*hidden_dim,
+                                                hidden_dim=hidden_dim, output_dim=hidden_dim,
+                                                #dropout=dropout, # TODO: Why doesn't MLP support dropout?
+                                                param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
+                                                bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in range(layers)])
+
+  @handle_xnmt_event
+  def on_start_sent(self, src):
+    self._final_states = None
+
+  def get_final_states(self) -> List[transducers.FinalTransducerState]:
+    z = dy.zeros(2 * self.hidden_dim)
+    # TODO: Maybe this should just be a linear transform of the ROOT's inside vector
+    return [transducers.FinalTransducerState(z, z)]
+    return self._final_states
+
+  def embed_subtree_inside(self, tree: 'SyntaxTree', layer_idx=0):
+    if len(tree.children) == 0:
+      return SyntaxTree(tree.label, tree.children)
+    else:
+      children = [self.embed_subtree_inside(child, layer_idx)
+                    for child in tree.children]
+      child_embs = [child.label for child in children]
+      fwd_expr_seq = expression_seqs.ExpressionSequence([tree.label] + child_embs)
+      rev_expr_seq = expression_seqs.ExpressionSequence([tree.label] + child_embs[::-1])
+      fwd_summary = self.inside_fwd_layers[layer_idx].transduce(fwd_expr_seq)[-1]
+      rev_summary = self.inside_rev_layers[layer_idx].transduce(rev_expr_seq)[-1]
+      summary = fwd_summary + rev_summary
+      return SyntaxTree(summary, children)
+
+  def embed_subtree_outside(self, tree: 'SyntaxTree',
+                              left_sibs, right_sibs, parent_outside,
+                              layer_idx=0):
+    # Should combine (summary vectors of):
+    # 1) Left siblings' inside representations
+    # 2) Right siblings' inside representations
+    # 3) Parent's outside representation
+    zeros = dy.zeros(self.hidden_dim)
+    if len(left_sibs) > 0:
+      left_sibs = expression_seqs.ExpressionSequence(left_sibs)
+      left_context = self.outside_left_layers[layer_idx].transduce(left_sibs)[-1]
+    else:
+      left_context = zeros
+    if len(right_sibs) > 0:
+      right_sibs = expression_seqs.ExpressionSequence(right_sibs[::-1]) 
+      right_context = self.outside_right_layers[layer_idx].transduce(right_sibs)[-1]
+    else:
+      right_context = zeros
+    summary_in = dy.concatenate([left_context, right_context, parent_outside])
+    summary = self.mlps[layer_idx].transform(summary_in)
+
+    new_children = []
+    for i, child in enumerate(tree.children):
+      left_sibs = [node.label for node in tree.children[:i]]
+      right_sibs = [node.label for node in tree.children[i+1:]]
+      new_child = self.embed_subtree_outside(
+        child, left_sibs, right_sibs, summary, layer_idx)
+      new_children.append(new_child)
+    return SyntaxTree(summary, new_children)
+
+  def embed_tree(self, tree: 'SyntaxTree'):
+    root_outside = dy.zeros(self.hidden_dim)
+    for i in range(self.layers):
+      inside_tree = self.embed_subtree_inside(tree, i)
+      outside_tree = self.embed_subtree_outside(tree, [], [], root_outside, i)
+      tree = self.zip_trees([inside_tree, outside_tree])
+    return tree
+
+  def zip_trees(self, trees):
+    """Takes a list of trees, all with the same structure,
+    and returns a new tree wherein each node's vector is the
+    concatenation of the same node's vectors in the input trees"""
+    # Verify that all the trees have the same structure
+    assert len(trees) > 0
+    for i in range(1, len(trees)):
+      assert len(trees[i].children) == len(trees[0].children)
+
+    children = [self.zip_trees([tree.children[i] for tree in trees]) for i in range(len(trees[0].children))]
+    #label = dy.concatenate([tree.label for tree in trees])
+    label = dy.esum([tree.label for tree in trees])
+    return SyntaxTree(label, children)
+
+  def linearize(self, tree: 'SyntaxTree'):
+    """Converts a SyntaxTree of vectors into a linear sequence of vectors"""
+    r = [tree.label]
+    for child in tree.children:
+      r += self.linearize(child)
+    return r
+
+  def transduce(self, trees: 'SyntaxTree') -> 'expression_seqs.ExpressionSequence':
+    if type(trees) != list:
+      tree = self.embed_tree(trees)
+      return self.linearize(tree)
+    else:
+      assert len(trees) == 1
+      output = [self.transduce(t) for t in trees]
+      assert len(output) == 1
+      output = output[0] # XXX
+      return expression_seqs.ExpressionSequence(output)
