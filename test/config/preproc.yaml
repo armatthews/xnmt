@@ -36,9 +36,9 @@ standard-preproc: !Experiment
       - test/tmp/head.tok.norm.filter.ja
       - test/tmp/head.tok.norm.filter.en
       specs:
-      - type: length
-        min: 1
-        max: 50
+      - !SentenceFiltererLength
+        min_all: 1
+        max_all: 50
     - !PreprocVocab
       in_files:
       - test/tmp/head.tok.norm.ja
@@ -66,9 +66,9 @@ standard-preproc: !Experiment
       hidden_dim: 256
       state_dim: 256
       input_dim: 256
-    trg_embedder: !SimpleWordEmbedder
-      emb_dim: 256
     decoder: !AutoRegressiveDecoder
+      embedder: !SimpleWordEmbedder
+        emb_dim: 256
       rnn: !UniLSTMSeqTransducer
         layers: 1
       bridge: !NoBridge {}

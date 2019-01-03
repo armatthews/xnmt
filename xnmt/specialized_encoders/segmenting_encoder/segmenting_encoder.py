@@ -56,8 +56,7 @@ class SegmentingSeqTransducer(SeqTransducer, Serializable, Reportable):
                      length_prior=None,
                      eps_greedy=None,
                      sample_during_search=False,
-                     reporter=None,
-                     compute_report=Ref("exp_global.compute_report", default=False)):
+                     reporter=None):
     self.embed_encoder = self.add_serializable_component("embed_encoder", embed_encoder, lambda: embed_encoder)
     self.segment_composer = self.add_serializable_component("segment_composer", segment_composer, lambda: segment_composer)
     self.final_transducer = self.add_serializable_component("final_transducer", final_transducer, lambda: final_transducer)
@@ -65,7 +64,6 @@ class SegmentingSeqTransducer(SeqTransducer, Serializable, Reportable):
     self.length_prior = self.add_serializable_component("length_prior", length_prior, lambda: length_prior) if length_prior is not None else None
     self.eps_greedy = self.add_serializable_component("eps_greedy", eps_greedy, lambda: eps_greedy) if eps_greedy is not None else None
     self.sample_during_search = sample_during_search
-    self.compute_report = compute_report
     self.reporter = reporter
     self.no_char_embed = issubclass(segment_composer.__class__, VocabBasedComposer)
     # Others
@@ -113,7 +111,7 @@ class SegmentingSeqTransducer(SeqTransducer, Serializable, Reportable):
         self.seg_size_unpadded = seg_size_unpadded
       self.compose_output = outputs
       self.segment_actions = actions
-      if not self.train and self.compute_report:
+      if not self.train and self.is_reporting():
         if len(actions) == 1: # Support only AccuracyEvalTask
           self.report_sent_info({"segment_actions": actions})
 
@@ -121,25 +119,19 @@ class SegmentingSeqTransducer(SeqTransducer, Serializable, Reportable):
   def on_calc_additional_loss(self, trg, generator, generator_loss):
     if self.policy_learning is None:
       return None
-    trg_counts = dy.inputTensor([t.len_unpadded() for t in trg], batched=True)
     reward = FactoredLossExpr()
-    # Adding all reward from the translator
-    for loss_key, loss_value in generator_loss.get_nobackprop_loss().items():
-      if loss_key == 'mle':
-        reward.add_loss('mle', dy.cdiv(-loss_value, trg_counts))
-      else:
-        reward.add_loss(loss_key, -loss_value)
+    reward.add_loss("generator", -dy.inputTensor(generator_loss.value(), batched=True))
     if self.length_prior is not None:
-      reward.add_loss('seg_lp', self.length_prior.log_ll(self.seg_size_unpadded))
+      reward.add_loss('length_prior', self.length_prior.log_ll(self.seg_size_unpadded))
     reward_value = reward.value()
     if trg.batch_size() == 1:
       reward_value = [reward_value]
     reward_tensor = dy.inputTensor(reward_value, batched=True)
-    ### Calculate losses    
+    ### Calculate losses
     try:
       return self.policy_learning.calc_loss(reward_tensor)
     finally:
-      self.reward = reward_tensor
+      self.reward = reward
       if self.train and self.reporter is not None:
         self.reporter.report_process(self)
 

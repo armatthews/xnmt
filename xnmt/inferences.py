@@ -35,11 +35,15 @@ class Inference(object):
     reporter: a reporter to create reports for each decoded sentence
   """
   @events.register_xnmt_handler
-  def __init__(self, src_file: Optional[str] = None, trg_file: Optional[str] = None, ref_file: Optional[str] = None,
-               max_src_len: Optional[int] = None, max_num_sents: Optional[int] = None,
+  def __init__(self,
+               src_file: Optional[str] = None,
+               trg_file: Optional[str] = None,
+               ref_file: Optional[str] = None,
+               max_src_len: Optional[int] = None,
+               max_num_sents: Optional[int] = None,
                mode: str = "onebest",
                batcher: batchers.InOrderBatcher = bare(batchers.InOrderBatcher, batch_size=1),
-               reporter: Union[None, reports.Reporter, Sequence[reports.Reporter]] = None):
+               reporter: Union[None, reports.Reporter, Sequence[reports.Reporter]] = None) -> None:
     self.src_file = src_file
     self.trg_file = trg_file
     self.ref_file = ref_file
@@ -147,8 +151,11 @@ class Inference(object):
     # If we have a reference file return it, otherwise return "None" infinitely
     forced_ref_in = generator.trg_reader.read_sents(forced_ref_file) if forced_ref_file else iter(lambda: None, 1)
     assert_in = assert_scores if assert_scores else iter(lambda: None, 1)
-    with open(trg_file, 'wt', encoding='utf-8') as fp:  # Saving the translated output to a trg file
-      cur_sent_i = 0
+    # Reporting is commenced if there is some defined reporters
+    is_reporting = self.reporter is not None
+    event_trigger.set_reporting(is_reporting)
+    # Saving the translated output to a trg file
+    with open(trg_file, 'wt', encoding='utf-8') as fp:
       src_batch, ref_batch, assert_batch = [], [], []
       for curr_sent_i, (src_line, ref_line, assert_line) in enumerate(zip(src_in, forced_ref_in, assert_in)):
         if self.max_num_sents and cur_sent_i >= self.max_num_sents:
@@ -161,7 +168,13 @@ class Inference(object):
           src_batch, ref_batch, assert_batch = [], [], []
       if len(src_batch) != 0:
         self._generate_one_batch(generator, batcher, src_batch, ref_batch, assert_batch, max_src_len, fp)
-      if self.reporter: self._conclude_report()
+    # Finishing up
+    try:
+      if is_reporting:
+        self._conclude_report()
+    finally:
+      # Reporting is done in _generate_output only
+      event_trigger.set_reporting(False)
 
   def _create_sent_report(self):
     assert self.reporter is not None
@@ -275,12 +288,16 @@ class IndependentOutputInference(Inference, Serializable):
                      max_num_sents=max_num_sents, mode=mode, batcher=batcher, reporter=reporter)
     self.post_processor = output.OutputProcessor.get_output_processor(post_process) or None
 
-  def generate_one(self, generator: 'models.GeneratorModel', src: batchers.Batch, forced_ref_ids)\
-          -> List[sent.Sentence]:
+  def generate_one(self,
+                   generator: 'models.GeneratorModel',
+                   src: batchers.Batch,
+                   forced_ref_ids: Optional[Sequence[numbers.Integral]]) -> List[sent.Sentence]:
     outputs = generator.generate(src, forced_trg_ids=forced_ref_ids)
     return outputs
 
-  def compute_losses_one(self, generator: 'models.GeneratorModel', src: sent.Sentence,
+  def compute_losses_one(self,
+                         generator: 'models.GeneratorModel',
+                         src: sent.Sentence,
                          ref: sent.Sentence) -> losses.FactoredLossExpr:
     loss_expr = loss_calculators.MLELoss().calc_loss(generator, src, ref)
     return loss_expr
@@ -313,25 +330,33 @@ class AutoRegressiveInference(Inference, Serializable):
   yaml_tag = '!AutoRegressiveInference'
 
   @serializable_init
-  def __init__(self, src_file: Optional[str] = None, trg_file: Optional[str] = None, ref_file: Optional[str] = None,
-               max_src_len: Optional[int] = None, max_num_sents: Optional[int] = None,
+  def __init__(self,
+               src_file: Optional[str] = None,
+               trg_file: Optional[str] = None,
+               ref_file: Optional[str] = None,
+               max_src_len: Optional[int] = None,
+               max_num_sents: Optional[int] = None,
                post_process: Union[str, output.OutputProcessor, Sequence[output.OutputProcessor]] = [],
                search_strategy: search_strategies.SearchStrategy = bare(search_strategies.BeamSearch),
                mode: str = "onebest",
                batcher: batchers.InOrderBatcher = bare(batchers.InOrderBatcher, batch_size=1),
-               reporter: Union[None, reports.Reporter, Sequence[reports.Reporter]] = None):
+               reporter: Union[None, reports.Reporter, Sequence[reports.Reporter]] = None) -> None:
     super().__init__(src_file=src_file, trg_file=trg_file, ref_file=ref_file, max_src_len=max_src_len,
                      max_num_sents=max_num_sents, mode=mode, batcher=batcher, reporter=reporter)
 
     self.post_processor = output.OutputProcessor.get_output_processor(post_process) or None
     self.search_strategy = search_strategy
 
-  def generate_one(self, generator: 'models.GeneratorModel', src: batchers.Batch, forced_ref_ids)\
-          -> List[sent.Sentence]:
+  def generate_one(self,
+                   generator: 'models.GeneratorModel',
+                   src: batchers.Batch,
+                   forced_ref_ids: Optional[Sequence[numbers.Integral]]) -> List[sent.Sentence]:
     outputs = generator.generate(src, forced_trg_ids=forced_ref_ids, search_strategy=self.search_strategy)
     return outputs
 
-  def compute_losses_one(self, generator: 'models.GeneratorModel', src: sent.Sentence,
+  def compute_losses_one(self,
+                         generator: 'models.GeneratorModel',
+                         src: sent.Sentence,
                          ref: sent.Sentence) -> losses.FactoredLossExpr:
     loss_expr = loss_calculators.MLELoss().calc_loss(generator, src, ref)
     return loss_expr

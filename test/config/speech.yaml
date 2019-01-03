@@ -3,7 +3,6 @@ speech: !Experiment
     save_num_checkpoints: 2
     default_layer_dim: 32
     dropout: 0.4
-    compute_report: True
   preproc: !PreprocRunner
     overwrite: False
     tasks:
@@ -26,9 +25,9 @@ speech: !Experiment
       state_dim: 64
       hidden_dim: 64
       input_dim: 64
-    trg_embedder: !SimpleWordEmbedder
-      emb_dim: 64
     decoder: !AutoRegressiveDecoder
+      embedder: !SimpleWordEmbedder
+        emb_dim: 64
       rnn: !UniLSTMSeqTransducer
         layers: 1
       bridge: !CopyBridge {}

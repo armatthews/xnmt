@@ -11,6 +11,7 @@ from xnmt.modelparts.bridges import CopyBridge
 from xnmt.modelparts.decoders import AutoRegressiveDecoder
 from xnmt.modelparts.embedders import SimpleWordEmbedder
 import xnmt.events
+from xnmt.eval import metrics
 from xnmt import batchers, event_trigger
 from xnmt.input_readers import PlainTextReader
 from xnmt.input_readers import CharFromWordTextReader
@@ -73,14 +74,13 @@ class TestSegmentingEncoder(unittest.TestCase):
       src_embedder=SimpleWordEmbedder(emb_dim=layer_dim, vocab_size=100),
       encoder=self.segmenting_encoder,
       attender=MlpAttender(input_dim=layer_dim, state_dim=layer_dim, hidden_dim=layer_dim),
-      trg_embedder=SimpleWordEmbedder(emb_dim=layer_dim, vocab_size=100),
       decoder=AutoRegressiveDecoder(input_dim=layer_dim,
                                     rnn=UniLSTMSeqTransducer(input_dim=layer_dim, hidden_dim=layer_dim,
                                                              decoder_input_dim=layer_dim, yaml_path="decoder"),
                                     transform=AuxNonLinear(input_dim=layer_dim, output_dim=layer_dim,
                                                            aux_input_dim=layer_dim),
                                     scorer=Softmax(vocab_size=100, input_dim=layer_dim),
-                                    trg_embed_dim=layer_dim,
+                                    embedder=SimpleWordEmbedder(emb_dim=layer_dim, vocab_size=100),
                                     bridge=CopyBridge(dec_dim=layer_dim, dec_layers=1)),
     )
     event_trigger.set_train(True)
@@ -95,7 +95,7 @@ class TestSegmentingEncoder(unittest.TestCase):
   def test_reinforce_loss(self):
     fertility_loss = GlobalFertilityLoss()
     mle_loss = MLELoss()
-    loss = CompositeLoss(losses=[mle_loss, fertility_loss]).calc_loss(self.model, self.src[0], self.trg[0])
+    loss = CompositeLoss(pt_losses=[mle_loss, fertility_loss]).calc_loss(self.model, self.src[0], self.trg[0])
     reinforce_loss = event_trigger.calc_additional_loss(self.trg[0], self.model, loss)
     pl = self.model.encoder.policy_learning
     # Ensure correct length
@@ -189,14 +189,13 @@ class TestComposing(unittest.TestCase):
       src_embedder=SimpleWordEmbedder(emb_dim=layer_dim, vocab_size=100),
       encoder=self.segmenting_encoder,
       attender=MlpAttender(input_dim=layer_dim, state_dim=layer_dim, hidden_dim=layer_dim),
-      trg_embedder=SimpleWordEmbedder(emb_dim=layer_dim, vocab_size=100),
       decoder=AutoRegressiveDecoder(input_dim=layer_dim,
                                     rnn=UniLSTMSeqTransducer(input_dim=layer_dim, hidden_dim=layer_dim,
                                                              decoder_input_dim=layer_dim, yaml_path="decoder"),
                                     transform=AuxNonLinear(input_dim=layer_dim, output_dim=layer_dim,
                                                            aux_input_dim=layer_dim),
                                     scorer=Softmax(vocab_size=100, input_dim=layer_dim),
-                                    trg_embed_dim=layer_dim,
+                                    embedder=SimpleWordEmbedder(emb_dim=layer_dim, vocab_size=100),
                                     bridge=CopyBridge(dec_dim=layer_dim, dec_layers=1)),
     )
     event_trigger.set_train(True)
@@ -348,6 +347,15 @@ class TestComposing(unittest.TestCase):
                                                                                     hidden_dim=self.layer_dim))
     event_trigger.set_train(True)
     enc.transduce(self.inp_emb(0))
+
+class TestSegmentationFMeasureEvaluator(unittest.TestCase):
+  def test_fmeasure(self):
+    self.assertEqual(metrics.SegmentationFMeasureEvaluator().evaluate_one_sent("ab c def".split(), "a bc def".split()).value(),
+                     0.80)
+
+  def test_fmeasure_error(self):
+    with self.assertRaises(Exception) as context:
+      metrics.SegmentationFMeasureEvaluator().evaluate_one_sent("aaa b".split(), "aaa".split())
 
 if __name__ == "__main__":
   unittest.main()

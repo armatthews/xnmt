@@ -13,6 +13,14 @@ class TestRunningConfig(unittest.TestCase):
   def test_assemble(self):
     run.main(["test/config/assemble.yaml"])
 
+  def test_autobatch_fail(self):
+    with self.assertRaises(ValueError) as context:
+      run.main(["test/config/autobatch-fail.yaml"])
+    self.assertEqual(str(context.exception), 'AutobatchTrainingRegimen forces the batcher to have batch_size 1. Use update_every to set the actual batch size in this regimen.')
+
+  def test_autobatch(self):
+    run.main(["test/config/autobatch.yaml"])
+
   def test_cascade(self):
     run.main(["test/config/cascade.yaml"])
 
@@ -30,6 +38,9 @@ class TestRunningConfig(unittest.TestCase):
 
   def test_forced(self):
     run.main(["test/config/forced.yaml"])
+
+  def test_lattice(self):
+    run.main(["test/config/lattice.yaml"])
 
   def test_lm(self):
     run.main(["test/config/lm.yaml"])
