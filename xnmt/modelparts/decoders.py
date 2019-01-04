@@ -202,37 +202,31 @@ class RnngDecoder(Decoder, Serializable):
   @serializable_init
   def __init__(self, input_dim = Ref("exp_global.default_layer_dim"),
                hidden_dim = Ref("exp_global.default_layer_dim"),
-               dropout = 0.0, action_scorer=None,
+               dropout = 0.0,
+               embedder: embedders.Embedder = bare(embedders.SimpleWordEmbedder),
+               action_scorer=bare(scorers.Softmax, vocab_size=RnngVocab.NUM_ACTIONS),
                term_scorer = bare(scorers.Softmax), nt_scorer = bare(scorers.Softmax),
                bridge: bridges.Bridge = bare(bridges.CopyBridge),
                vocab=None, nt_vocab=None,
-               stack_lstm=None, comp_lstm_fwd=None, comp_lstm_rev=None,
-               compose_transform=None, state_transform=None):
+               stack_lstm=bare(recurrent.UniLSTMSeqTransducer),
+               comp_lstm_fwd=bare(recurrent.UniLSTMSeqTransducer),
+               comp_lstm_rev=bare(recurrent.UniLSTMSeqTransducer),
+               compose_transform=bare(transforms.NonLinear),
+               state_transform=None):
 
     #model = param_collections.ParamManager.my_params(self)
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
     self.dropout = dropout
-    self.action_scorer = self.add_serializable_component(
-        'action_scorer', action_scorer,
-        lambda: scorers.Softmax(input_dim, vocab_size=RnngVocab.NUM_ACTIONS))
+    self.action_scorer = action_scorer
     self.term_scorer = term_scorer
     self.nt_scorer = nt_scorer
     self.bridge = bridge
 
     # LSTMs
-    self.stack_lstm = self.add_serializable_component('stack_lstm', stack_lstm,
-        lambda: recurrent.UniLSTMSeqTransducer(input_dim=input_dim,
-                                               hidden_dim=hidden_dim,
-                                               dropout=dropout))
-    self.comp_lstm_fwd = self.add_serializable_component(
-        'comp_lstm_fwd', comp_lstm_fwd,
-        lambda: recurrent.UniLSTMSeqTransducer(
-        input_dim=input_dim, hidden_dim=hidden_dim, dropout=dropout))
-    self.comp_lstm_rev = self.add_serializable_component(
-        'comp_lstm_rev', comp_lstm_rev,
-        lambda: recurrent.UniLSTMSeqTransducer(
-        input_dim=input_dim, hidden_dim=hidden_dim, dropout=dropout))
+    self.stack_lstm = stack_lstm 
+    self.comp_lstm_fwd = comp_lstm_fwd
+    self.comp_lstm_rev = comp_lstm_rev
 
     # Embedding Tables
     # Is this the right place for these to live??
@@ -245,9 +239,7 @@ class RnngDecoder(Decoder, Serializable):
     # f = LSTM(label + children)
     # r = LSTM(label + children[::-1])
     # final = tanh(w * [f; r] + b) = tanh(linear([f; r]))
-    self.compose_transform = self.add_serializable_component(
-        'compose_transform', compose_transform,
-        lambda: transforms.NonLinear(hidden_dim, hidden_dim))
+    self.compose_transform = compose_transform
 
     # The parser state is computed as
     # tanh(W * [s; w] + b)
@@ -309,6 +301,17 @@ class RnngDecoder(Decoder, Serializable):
 
   def initial_state(self, enc_final_states, ss_expr):
     return RnngDecoderState(self.hidden_dim)
+
+  def shared_params(self):
+    return [{".input_dim", ".action_scorer.input_dim"},
+            {".input_dim", ".stack_lstm.input_dim"},
+            {".input_dim", ".comp_lstm_fwd.input_dim"},
+            {".input_dim", ".comp_lstm_rev.input_dim"},
+            {".hidden_dim", ".stack_lstm.hidden_dim"},
+            {".hidden_dim", ".comp_lstm_fwd.hidden_dim"},
+            {".hidden_dim", ".comp_lstm_rev.hidden_dim"},
+            {".hidden_dim", ".compose_transform.input_dim"},
+            {".hidden_dim", ".compose_transform.output_dim"}]
 
 # TODO: This should be factored to simply use Softmax
 # class AutoRegressiveLexiconDecoder(AutoRegressiveDecoder, Serializable):

@@ -134,7 +134,7 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
         dec_state.rnn_state, ref_word = batchers.truncate_batches(dec_state.rnn_state, ref_word)
 
       if input_word is not None:
-        dec_state = self.decoder.add_input(dec_state, self.trg_embedder.embed(input_word))
+        dec_state = self.decoder.add_input(dec_state, input_word)
 
       rnn_output = dec_state.as_vector()
       dec_state.context = self.attender.calc_context(rnn_output)

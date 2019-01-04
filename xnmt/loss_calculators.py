@@ -1,7 +1,6 @@
 from typing import List, Optional, Sequence, Union
 import numbers
 
-import sys
 import dynet as dy
 import numpy as np
 
