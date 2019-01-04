@@ -100,8 +100,7 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
   def shared_params(self):
     return [{".src_embedder.emb_dim", ".encoder.input_dim"},
             {".encoder.hidden_dim", ".attender.input_dim", ".decoder.input_dim"},
-            {".attender.state_dim", ".decoder.rnn.hidden_dim"},
-            {".decoder.trg_embed_dim"}]
+            {".attender.state_dim", ".decoder.rnn.hidden_dim"}]
 
   def _encode_src(self, src: Union[batchers.Batch, sent.Sentence]):
     embeddings = self.src_embedder.embed_sent(src)
@@ -137,7 +136,7 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
         dec_state.rnn_state, ref_word = batchers.truncate_batches(dec_state.rnn_state, ref_word)
 
       if input_word is not None:
-        dec_state = self.decoder.add_input(dec_state, self.trg_embedder.embed(input_word))
+        dec_state = self.decoder.add_input(dec_state, input_word)
 
       rnn_output = dec_state.as_vector()
       dec_state.context = self.attender.calc_context(rnn_output)

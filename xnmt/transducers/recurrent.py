@@ -411,8 +411,8 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
                hidden_dim=Ref("exp_global.default_layer_dim"),
                dropout=Ref("exp_global.dropout", default=0.0),
                weightnoise_std=Ref("exp_global.weight_noise", default=0.0),
-               param_init=Ref("exp_global.param_init", default=bare(GlorotInitializer)),
-               bias_init=Ref("exp_global.bias_init", default=bare(ZeroInitializer)),
+               param_init=Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
+               bias_init=Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer)),
                inside_fwd_layers=None, inside_rev_layers=None,
                outside_left_layers=None, outside_right_layers=None, mlps=None):
     self.num_layers = layers
