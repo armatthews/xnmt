@@ -510,7 +510,10 @@ class RnngEmbedder(Embedder, Serializable):
   yaml_tag = '!RnngEmbedder'
 
   @serializable_init
-  def __init__(self, term_emb, nt_emb, vocab):
+  def __init__(self,
+               term_emb=bare(SimpleWordEmbedder),
+               nt_emb=bare(SimpleWordEmbedder),
+               vocab=None):
     self.term_emb = term_emb
     self.nt_emb = nt_emb
     self.vocab = vocab
@@ -531,9 +534,9 @@ class RnngEmbedder(Embedder, Serializable):
     if action == RnngVocab.NONE:
       assert wid == None
     elif action == RnngVocab.SHIFT:
-      emb = term_emb.embed(wid)
+      emb = self.term_emb.embed(wid)
     elif action == RnngVocab.NT:
-      emb = nt_emb.embed(wid)
+      emb = self.nt_emb.embed(wid)
     elif action == RnngVocab.REDUCE:
       assert wid == None
     else:
