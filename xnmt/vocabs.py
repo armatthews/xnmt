@@ -131,8 +131,19 @@ class RnngVocab(Serializable):
     else:
       raise 'Invalid RNNG input word: %s. Should be one of SHIFT(terminal), NT(non-terminal), or REDUCE'
 
+  def convert_terminal(self, word):
+    return self.term_vocab.convert(term)
+
+  def convert_nt(self, nt):
+    return self.nt_vocab.convert(nt)
+
+  def lookup_terminal(self, word_id):
+    return self.term_vocab[word_id]
+
+  def lookup_nt(self, nt_id):
+    return self.nt_vocab[nt_id]
+
   def __getitem__(self, i):
-    assert isinstance(i, RnngAction)
     assert len(i) == 2
 
     if i[0] == RnngVocab.NONE:

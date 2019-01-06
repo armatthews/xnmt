@@ -3,7 +3,7 @@ import numbers
 
 import dynet as dy
 
-from xnmt import batchers, param_collections
+from xnmt import batchers, param_collections, expression_seqs
 from xnmt.modelparts import bridges, transforms, scorers, embedders
 from xnmt.transducers import recurrent
 from xnmt.persistence import serializable_init, Serializable, bare, Ref
@@ -158,43 +158,51 @@ class AutoRegressiveDecoder(Decoder, Serializable):
   def calc_loss(self, mlp_dec_state, ref_action):
     return self.scorer.calc_loss(self._calc_transform(mlp_dec_state), ref_action)
 
-class RnngAction:
-  SHIFT = 0
-  NT = 1
-  REDUCE = 2
-
-  def __init__(self, action_type=None, subtype=None):
-    self.action_type = action_type
-    self.subtype = subtype
-
-  @staticmethod
-  def from_index(index):
-    pass
-
-  def get_index(self):
-    pass
 
 class RnngDecoderState(object):
   MaxOpenNTs = 100
 
-  def __init__(self, hidden_dim):
+  def __init__(self, initial_state):
     self.stack = [] # Subtree embeddings
     self.terminals = [] # Generated terminals
     self.is_open_paren = [] # -1 if no non-terminal has a paren open, otherwise index of NT
     self.num_open_parens = 0
     self.prev_action = None
+    self.stack_emb = initial_state
 
-    self.stack_lstm_pointer = None
-    self.term_lstm_pointer = None
-    self.action_lstm_pointer = None
+  def __str__(self):
+    return '\n'.join(['stack: ' + str(self.stack), 'terms:' + str(self.terminals), 'iop: ' + str(self.is_open_paren), 'nop: ' + str(self.num_open_parens), 'prev:' + str(self.prev_action)])
 
-    self.stack_emb = dy.zeros(hidden_dim)
+  def is_forbidden(self, a):
+    if a.action not in [RnngVocab.SHIFT, RnngVocab.NT, RnngVocab.REDUCE]:
+      return True
 
-  def is_forbidden(self, action):
+    if a.action == RnngVocab.NT:
+      if self.num_open_parens >= RnngDecoderState.MaxOpenNTs:
+        return True
+
+    if len(self.stack) == 0:
+      if a.action != RnngVocab.NT:
+        return True
+
+    if a.action == RnngVocab.REDUCE:
+      if self.prev_action == RnngVocab.NT:
+        return True
+
     return False
 
   def as_vector(self):
-    return self.stack_emb
+    return self.stack_emb.output()
+
+  def copy(self):
+    r = RnngDecoderState(None)
+    r.stack = self.stack[:]
+    r.terminals = self.terminals[:]
+    r.is_open_paren = self.is_open_paren[:]
+    r.num_open_parens = self.num_open_parens
+    r.prev_action = self.prev_action
+    r.stack_emb = self.stack_emb
+    return r
 
 class RnngDecoder(Decoder, Serializable):
   yaml_tag = "!RnngDecoder"
@@ -203,25 +211,28 @@ class RnngDecoder(Decoder, Serializable):
   def __init__(self, input_dim = Ref("exp_global.default_layer_dim"),
                hidden_dim = Ref("exp_global.default_layer_dim"),
                dropout = 0.0,
-               embedder: embedders.Embedder = bare(embedders.SimpleWordEmbedder),
+               embedder: embedders.Embedder = bare(embedders.RnngEmbedder), 
                action_scorer=bare(scorers.Softmax, vocab_size=RnngVocab.NUM_ACTIONS),
                term_scorer = bare(scorers.Softmax), nt_scorer = bare(scorers.Softmax),
                bridge: bridges.Bridge = bare(bridges.CopyBridge),
-               vocab=None, nt_vocab=None,
-               stack_lstm=bare(recurrent.UniLSTMSeqTransducer),
-               comp_lstm_fwd=bare(recurrent.UniLSTMSeqTransducer),
-               comp_lstm_rev=bare(recurrent.UniLSTMSeqTransducer),
+               vocab=None,
+               stack_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
+               comp_lstm_fwd=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
+               comp_lstm_rev=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                compose_transform=bare(transforms.NonLinear),
-               state_transform=None):
+               state_transform=bare(transforms.NonLinear)):
 
     #model = param_collections.ParamManager.my_params(self)
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
     self.dropout = dropout
+    self.embedder = embedder
     self.action_scorer = action_scorer
     self.term_scorer = term_scorer
     self.nt_scorer = nt_scorer
     self.bridge = bridge
+
+    self.vocab = vocab
 
     # LSTMs
     self.stack_lstm = stack_lstm 
@@ -263,11 +274,11 @@ class RnngDecoder(Decoder, Serializable):
     action_log_probs = self.action_scorer.calc_log_probs(dec_state.as_vector())
     action_log_prob = dy.pick(action_log_probs, ref_action[0])
     log_prob = action_log_prob
-    if ref_action[0] == RnngAction.SHIFT:
+    if ref_action[0] == RnngVocab.SHIFT:
       term_log_probs = self.term_scorer.calc_log_probs(dec_state.as_vector())
       term_log_prob = dy.pick(term_log_probs, ref_action[1])
       log_prob += term_log_prob
-    elif ref_action[0] == RnngAction.NT:
+    elif ref_action[0] == RnngVocab.NT:
       nt_log_probs = self.nt_scorer.calc_log_probs(dec_state.as_vector())
       nt_log_prob = dy.pick(nt_log_probs, ref_action[1])
       log_prob += nt_log_prob
@@ -286,21 +297,85 @@ class RnngDecoder(Decoder, Serializable):
     pass
 
   def perform_shift(self, dec_state, word_id):
-    pass
+    _, word_emb = self.embedder.embed((RnngVocab.SHIFT, word_id))
+    # TODO: if word_emb's dimensionality is not the same as the stack
+    # LSTM's hidden_dim, we need a transform.
+    new_state = dec_state.copy()
+    new_state.stack.append(word_emb)
+    c, h = self.stack_lstm.add_input_to_prev(dec_state.stack_emb, word_emb)
+    self.stack_emb = recurrent.UniLSTMState(self.stack_lstm, dec_state.stack_emb, c=c, h=h)
+    new_state.terminals.append(word_id)
+    new_state.is_open_paren.append(-1)
+    new_state.prev_action = RnngVocab.SHIFT
+    return new_state
 
   def perform_nt(self, dec_state, nt_id):
-    pass
+    assert dec_state.num_open_parens < RnngDecoderState.MaxOpenNTs
+    _, nt_emb = self.embedder.embed((RnngVocab.NT, nt_id))
+    new_state = dec_state.copy()
+    new_state.stack.append(nt_emb)
+    c, h = self.stack_lstm.add_input_to_prev(dec_state.stack_emb, nt_emb)
+    self.stack_emb = recurrent.UniLSTMState(self.stack_lstm, dec_state.stack_emb, c=c, h=h)
+    new_state.num_open_parens += 1
+    new_state.is_open_paren.append(nt_id)
+    new_state.prev_action = RnngVocab.NT
+    return new_state
 
   def perform_reduce(self, dec_state):
-    pass
+    assert dec_state.num_open_parens > 0
+    assert len(dec_state.stack) > 1 
+
+    last_nt_index = len(dec_state.is_open_paren) - 1
+    while dec_state.is_open_paren[last_nt_index] < 0:
+      assert last_nt_index > 0
+      last_nt_index -= 1
+    assert last_nt_index >= 0
+
+    num_children = len(dec_state.is_open_paren) - last_nt_index - 1
+    assert num_children > 0
+    children = dec_state.stack[-num_children:]
+    nt_emb = dec_state.stack[-(num_children + 1)]
+    # TODO: assert this nt_emb is correct by re-embedding from the last_nt_index
+
+    new_state = dec_state.copy()
+    # TODO: fix up stack pointers
+    new_state.stack.pop()
+    new_state.is_open_paren.pop()
+    new_state.num_open_parens -= 1
+    for i in range(num_children):
+      new_state.stack.pop()
+      new_state.is_open_paren.pop()
+
+    fwd_children = expression_seqs.ExpressionSequence([nt_emb] + children)
+    rev_children = expression_seqs.ExpressionSequence([nt_emb] + children[::-1])
+    fwd_lstm_out = self.comp_lstm_fwd.transduce([fwd_children])[-1]
+    rev_lstm_out = self.comp_lstm_rev.transduce([rev_children])[-1]
+    bidir_out = fwd_lstm_out + rev_lstm_out
+    composed = self.compose_transform.transform(bidir_out)
+    new_state.stack.append(composed)
+    new_state.is_open_paren.append(-1)
+      
+    new_state.prev_action = RnngVocab.REDUCE
+    return new_state
 
   def add_input(self, dec_state, word):
-    print('Adding input: ' + str(word) + ' ' + str(type(word)))
-    raise Exception()
-    return self.initial_state(None, None)
+    assert len(word) == 1
+    word = word[0]
+    assert not dec_state.is_forbidden(word)
+
+    if word.action == RnngVocab.SHIFT:
+      return self.perform_shift(dec_state, word.subaction)
+    elif word.action == RnngVocab.NT:
+      return self.perform_nt(dec_state, word.subaction)
+    elif word.action == RnngVocab.REDUCE:
+      return self.perform_reduce(dec_state)
+    elif word.action == RnngVocab.NONE:
+      return dec_state.copy()
+    else:
+      raise Exception()
 
   def initial_state(self, enc_final_states, ss_expr):
-    return RnngDecoderState(self.hidden_dim)
+    return RnngDecoderState(self.stack_lstm.initial_state())
 
   def shared_params(self):
     return [{".input_dim", ".action_scorer.input_dim"},
