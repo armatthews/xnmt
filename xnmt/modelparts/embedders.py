@@ -543,6 +543,11 @@ class RnngEmbedder(Embedder, Serializable):
       assert False
     return (action, emb)
 
+  def embed_terminal(self, wid):
+    return self.term_emb.embed(wid)
+
+  def embed_nt(self, ntid):
+    return self.nt_emb.embed(ntid)
 
   def embed_single_sent(self, sent):
     embs = [self.embed(word) for word in sent]
