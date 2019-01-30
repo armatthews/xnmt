@@ -177,7 +177,7 @@ class RnngDecoderState(object):
   def __str__(self):
     return '\n'.join(['stack: ' + str(self.stack), 'terms:' + str(self.terminals)])
 
-  def is_forbidden(self, a):
+  def is_forbidden(self, a : RnngAction):
     if a.action not in [RnngVocab.SHIFT, RnngVocab.NT, RnngVocab.REDUCE]:
       return True
 
@@ -260,53 +260,47 @@ class RnngDecoder(Decoder, Serializable):
     # and w is the source context
     self.state_transform = state_transform
 
-  def calc_loss(self, dec_state, ref_action):
+  def calc_state(self, dec_state : RnngDecoderState):
+    state_in = dy.concatenate([dec_state.as_vector(), dec_state.context])
+    state = self.state_transform.transform(state_in)
+    return state
+
+  def calc_loss(self, dec_state : RnngDecoderState, ref_action : RnngAction):
     assert dec_state.context != None
     assert type(ref_action) == batchers.ListBatch
     assert len(ref_action) == 1
     ref_action = ref_action[0]
 
-    state_in = dy.concatenate([dec_state.as_vector(), dec_state.context])
-    state = self.state_transform.transform(state_in)
+    state = self.calc_state(dec_state)
 
-    #action_log_probs = self.action_scorer.calc_log_probs(state)
-    #action_log_prob = dy.pick(action_log_probs, ref_action[0])
-    #log_prob = action_log_prob
     action_loss = self.action_scorer.calc_loss(state, ref_action[0])
     loss = action_loss
     if ref_action[0] == RnngVocab.SHIFT:
-      #term_log_probs = self.term_scorer.calc_log_probs(state)
-      #term_log_prob = dy.pick(term_log_probs, ref_action[1])
-      #log_prob += term_log_prob
       term_loss = self.term_scorer.calc_loss(state, ref_action[1])
       loss += term_loss
     elif ref_action[0] == RnngVocab.NT:
-      #nt_log_probs = self.nt_scorer.calc_log_probs(state)
-      #nt_log_prob = dy.pick(nt_log_probs, ref_action[1])
-      #log_prob += nt_log_prob
       nt_loss = self.nt_scorer.calc_loss(state, ref_action[1])
       loss += nt_loss
     return loss
-    return -log_prob
 
-  def calc_log_probs(self, dec_state):
+  def calc_log_probs(self, dec_state : RnngDecoderState):
     raise NotImplementedError()
 
-  def calc_score(self, calc_scores_logsoftmax):
+  def calc_score(self, calc_scores_logsoftmax : dy.Expression):
     raise NotImplementedError()
 
-  def calc_prob(self, calc_scores_logsoftmax):
+  def calc_prob(self, calc_scores_logsoftmax : dy.Expression):
     raise NotImplementedError()
 
-  def calc_log_prob(self, calc_scores_logsoftmax):
+  def calc_log_prob(self, calc_scores_logsoftmax : dy.Expression):
     raise NotImplementedError()
 
-  def stack_lstm_push(self, state_emb, word_emb):
+  def stack_lstm_push(self, state_emb : dy.Expression, word_emb : dy.Expression):
     c, h = self.stack_lstm.add_input_to_prev(state_emb, word_emb)
     r = recurrent.UniLSTMState(self.stack_lstm, state_emb, c=c, h=h)
     return r
 
-  def perform_shift(self, dec_state, word_id):
+  def perform_shift(self, dec_state : RnngDecoderState, word_id : Integral):
     assert not dec_state.is_forbidden(RnngAction(RnngVocab.SHIFT, word_id))
     assert len(dec_state.stack) > 0
     word_emb = self.embedder.embed_terminal(word_id)
@@ -327,7 +321,7 @@ class RnngDecoder(Decoder, Serializable):
     new_state.stack_emb = self.stack_lstm_push(dec_state.stack_emb, nt_emb)
     return new_state
 
-  def perform_reduce(self, dec_state):
+  def perform_reduce(self, dec_state : RnngDecoderState):
     assert not dec_state.is_forbidden(RnngAction(RnngVocab.REDUCE, None))
     assert len(dec_state.stack) > 0
 
@@ -349,7 +343,7 @@ class RnngDecoder(Decoder, Serializable):
 
     return new_state
 
-  def add_input(self, dec_state, word):
+  def add_input(self, dec_state : RnngDecoderState, word : RnngAction):
     assert len(word) == 1
     word = word[0]
     assert not dec_state.is_forbidden(word)
@@ -367,6 +361,17 @@ class RnngDecoder(Decoder, Serializable):
 
   def initial_state(self, enc_final_states, ss_expr):
     return RnngDecoderState(self.stack_lstm.initial_state())
+
+  def best_k(self, dec_state: RnngDecoderState, k: numbers.Integral, normalize_scores: bool = False):
+    state = self.calc_state(dec_state)
+
+    action_log_probs = self.action_scorer.calc_log_probs(state).npvalue()
+    term_log_probs = self.term_scorer.calc_log_probs(state).npvalue()
+    nt_log_probs = self.nt_scorer.calc_log_probs(state).npvalue()
+    assert action_log_probs.shape == (RnngVocab.NUM_ACTIONS,)
+
+    term_log_probs += action_log_probs[RnngVocab.SHIFT]
+    nt_log_probs += action_log_probs[RnngVocab.NT]
 
   def shared_params(self):
     return [{".input_dim", ".embedder.term_emb.emb_dim"},
