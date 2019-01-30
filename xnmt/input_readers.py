@@ -13,8 +13,8 @@ with warnings.catch_warnings():
   import h5py
 
 from xnmt import logger
-
 from xnmt import batchers, output, sent, events, vocabs
+from xnmt.sent import SimpleSentence, CompoundSentence, ArraySentence, ScalarSentence, SegmentedSentence, SyntaxTree
 from xnmt.persistence import serializable_init, Serializable
 
 class InputReader(object):
@@ -473,7 +473,6 @@ class IDReader(BaseTextReader, Serializable):
   def read_sents(self, filename: str, filter_ids: Optional[Sequence[numbers.Integral]] = None) -> list:
     return [l for l in self.iterate_filtered(filename, filter_ids)]
 
-
 class LatticeReader(BaseTextReader, Serializable):
   """
   Reads lattices from a text file.
@@ -541,6 +540,23 @@ class LatticeReader(BaseTextReader, Serializable):
   def vocab_size(self):
     return len(self.vocab)
 
+class SyntaxTreeReader(BaseTextReader, Serializable):
+  """
+  Reads in syntax trees, one per line, and converts them into xnmt Input objects.
+  """
+  yaml_tag = "!SyntaxTreeReader"
+
+  @serializable_init
+  def __init__(self, nt_vocab, term_vocab):
+    self.nt_vocab = nt_vocab
+    self.vocab = term_vocab
+
+  def read_sent(self, line, idx):
+    assert self.nt_vocab is not None
+    assert self.term_vocab is not None
+    tree = SyntaxTree.from_string(line, self.nt_vocab, self.vocab, idx)
+    import sys
+    return tree
 
 ###### A utility function to read a parallel corpus
 def read_parallel_corpus(src_reader: InputReader,
