@@ -221,11 +221,12 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
       output_actions = [x for x in curr_output.word_ids[0]]
       attentions = [x for x in curr_output.attentions[0]]
       score = curr_output.score[0]
-      out_sent = sent.SimpleSentence(idx=src[0].idx,
-                                     words=output_actions,
-                                     vocab=getattr(self.trg_reader, "vocab", None),
-                                     output_procs=self.trg_reader.output_procs,
-                                     score=score)
+      out_sent = self.trg_reader.make_sent(
+          idx=src[0].idx,
+          words=output_actions,
+          vocab=getattr(self.trg_reader, "vocab", None),
+          output_procs=self.trg_reader.output_procs,
+          score=score)
       if len(sorted_outputs) == 1:
         outputs.append(out_sent)
       else:

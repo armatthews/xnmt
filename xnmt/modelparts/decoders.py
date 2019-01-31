@@ -1,6 +1,7 @@
 from typing import Any
 from collections import namedtuple
 import numbers
+import heapq
 
 import dynet as dy
 
@@ -300,7 +301,7 @@ class RnngDecoder(Decoder, Serializable):
     r = recurrent.UniLSTMState(self.stack_lstm, state_emb, c=c, h=h)
     return r
 
-  def perform_shift(self, dec_state : RnngDecoderState, word_id : Integral):
+  def perform_shift(self, dec_state : RnngDecoderState, word_id : numbers.Integral):
     assert not dec_state.is_forbidden(RnngAction(RnngVocab.SHIFT, word_id))
     assert len(dec_state.stack) > 0
     word_emb = self.embedder.embed_terminal(word_id)
@@ -344,8 +345,10 @@ class RnngDecoder(Decoder, Serializable):
     return new_state
 
   def add_input(self, dec_state : RnngDecoderState, word : RnngAction):
-    assert len(word) == 1
-    word = word[0]
+    # TODO: Are these two lines needed at training time, but required to
+    # not be there for test time?
+    #assert len(word) == 1
+    #word = word[0]
     assert not dec_state.is_forbidden(word)
 
     if word.action == RnngVocab.SHIFT:
@@ -366,12 +369,33 @@ class RnngDecoder(Decoder, Serializable):
     state = self.calc_state(dec_state)
 
     action_log_probs = self.action_scorer.calc_log_probs(state).npvalue()
-    term_log_probs = self.term_scorer.calc_log_probs(state).npvalue()
-    nt_log_probs = self.nt_scorer.calc_log_probs(state).npvalue()
-    assert action_log_probs.shape == (RnngVocab.NUM_ACTIONS,)
+    best_terms = self.term_scorer.best_k(state, k, normalize_scores=True)
+    best_nts = self.nt_scorer.best_k(state, k, normalize_scores=True)
 
-    term_log_probs += action_log_probs[RnngVocab.SHIFT]
-    nt_log_probs += action_log_probs[RnngVocab.NT]
+    shift_score = action_log_probs[RnngVocab.SHIFT]
+    nt_score = action_log_probs[RnngVocab.NT]
+    reduce_score = action_log_probs[RnngVocab.REDUCE]
+
+    best_actions = []
+    for term, score in zip(*best_terms):
+      action = RnngAction(RnngVocab.SHIFT, term)
+      total_score = shift_score + score
+      heapq.heappush(best_actions, (total_score, action))
+    for nt, score in zip(*best_nts):
+      action = RnngAction(RnngVocab.NT, nt)
+      total_score = nt_score + score
+      heapq.heappush(best_actions, (total_score, action))
+    action = RnngAction(RnngVocab.REDUCE, None)
+    total_score = reduce_score
+    heapq.heappush(best_actions, (total_score, action))
+
+    r_actions = []
+    r_scores = []
+    for score, action in heapq.nlargest(k, best_actions):
+      if not dec_state.is_forbidden(action):
+        r_actions.append(action)
+        r_scores.append(score)
+    return r_actions, r_scores
 
   def shared_params(self):
     return [{".input_dim", ".embedder.term_emb.emb_dim"},

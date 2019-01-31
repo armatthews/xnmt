@@ -48,6 +48,17 @@ class InputReader(object):
     """
     return False
 
+  def make_sent(self, **kwargs) --> sent.Sentence:
+    """
+    Returns a sentence of the appropriate type, given the input reader
+
+    Args:
+      kwargs are passed along to the sub-class of Sentence
+    Returns: a Sentence object created from the given arguments
+    """
+    raise RuntimeError("Input readers must implement the make_sent function")
+    
+
 class BaseTextReader(InputReader):
 
   def read_sent(self, line: str, idx: numbers.Integral) -> sent.Sentence:
@@ -132,6 +143,12 @@ class PlainTextReader(BaseTextReader, Serializable):
   def vocab_size(self) -> numbers.Integral:
     return len(self.vocab)
 
+  def make_sent(self, **kwargs):
+    if self.read_sent_len:
+      return sent.ScalarSentence(**kwargs)
+    else:
+      return sent.SimpleSentence(**kwargs)
+
 class CompoundReader(InputReader, Serializable):
   """
   A compound reader reads inputs using several input readers at the same time.
@@ -170,6 +187,8 @@ class CompoundReader(InputReader, Serializable):
   def needs_reload(self) -> bool:
     return any(reader.needs_reload() for reader in self.readers)
 
+  def make_sent(self, **kwargs):
+    return sent.CompoundSentence(**kwargs)
 
 class SentencePieceTextReader(BaseTextReader, Serializable):
   """
@@ -225,6 +244,9 @@ class SentencePieceTextReader(BaseTextReader, Serializable):
   def vocab_size(self) -> numbers.Integral:
     return len(self.vocab)
 
+  def make_sent(self, **kwargs):
+    return sent.SimpleSentence(**kwargs)
+
 class RamlTextReader(BaseTextReader, Serializable):
   """
   Handles the RAML sampling, can be used on the target side, or on both the source and target side.
@@ -276,7 +298,10 @@ class RamlTextReader(BaseTextReader, Serializable):
                                output_procs=self.output_procs)
 
   def needs_reload(self) -> bool:
-    return True 
+    return True
+
+  def make_sent(self, **kwargs):
+    return sent.SimpleSentence(**kwargs)
 
 class CharFromWordTextReader(PlainTextReader, Serializable):
   """
@@ -315,6 +340,9 @@ class CharFromWordTextReader(PlainTextReader, Serializable):
                                         vocab=self.vocab,
                                         output_procs=self.output_procs)
     return sent_input
+
+  def make_sent(self, **kwargs):
+    return sent.SegmentedSentence(**kwargs)
 
 class H5Reader(InputReader, Serializable):
   """
@@ -455,6 +483,9 @@ class NpzReader(InputReader, Serializable):
     npz_file.close()
     return l
 
+  def make_sent(self, **kwargs):
+    return sent.ArraySentence(**kwargs)
+
 class IDReader(BaseTextReader, Serializable):
   """
   Handles the case where we need to read in a single ID (like retrieval problems).
@@ -473,6 +504,9 @@ class IDReader(BaseTextReader, Serializable):
   def read_sents(self, filename: str, filter_ids: Optional[Sequence[numbers.Integral]] = None) -> list:
     return [l for l in self.iterate_filtered(filename, filter_ids)]
 
+  def make_sent(self, **kwargs):
+    return sent.ScalarSentence(**kwargs)
+
 class SyntaxTreeReader(BaseTextReader, Serializable):
   """
   Reads in syntax trees, one per line, and converts them into xnmt Input objects.
@@ -490,6 +524,9 @@ class SyntaxTreeReader(BaseTextReader, Serializable):
     assert self.term_vocab is not None
     tree = sent.SyntaxTree.from_string(line, self.nt_vocab, self.vocab, idx)
     return tree
+
+  def make_sent(self, **kwargs):
+    return sent.SyntaxTree(**kwargs)
 
 class LatticeReader(BaseTextReader, Serializable):
   """
@@ -558,24 +595,8 @@ class LatticeReader(BaseTextReader, Serializable):
   def vocab_size(self):
     return len(self.vocab)
 
-class SyntaxTreeReader(BaseTextReader, Serializable):
-  """
-  Reads in syntax trees, one per line, and converts them into xnmt Input objects.
-  """
-  yaml_tag = "!SyntaxTreeReader"
-
-  @serializable_init
-  def __init__(self, nt_vocab, term_vocab):
-    self.nt_vocab = nt_vocab
-    self.vocab = term_vocab
-    self.output_procs = None
-
-  def read_sent(self, line, idx):
-    assert self.nt_vocab is not None
-    assert self.term_vocab is not None
-    tree = SyntaxTree.from_string(line, self.nt_vocab, self.vocab, idx)
-    import sys
-    return tree
+  def make_sent(self, **kwargs):
+    return sent.Lattice(**kwargs)
 
 class RnngReader(BaseTextReader, Serializable):
   """
@@ -586,11 +607,14 @@ class RnngReader(BaseTextReader, Serializable):
   @serializable_init
   def __init__(self, vocab):
     self.vocab = vocab
-    self.output_procs = None
+    self.output_procs = []
 
   def read_sent(self, line, idx):
     words = [self.vocab.convert(word) for word in line.strip().split()]
     return sent.RnngSentence(words=words, vocab=self.vocab)
+
+  def make_sent(self, **kwargs):
+    return sent.RnngSentence(**kwargs)
 
 ###### A utility function to read a parallel corpus
 def read_parallel_corpus(src_reader: InputReader,

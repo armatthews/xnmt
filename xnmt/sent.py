@@ -407,8 +407,8 @@ class SyntaxTree(Sentence):
                           unpadded_sent=unpadded_sent)
 
 class RnngSentence(ReadableSentence):
-  def __init__(self, words, vocab, idx=None, score=None):
-    super().__init__(idx, score) 
+  def __init__(self, words, vocab, idx=None, score=None, output_procs=[]):
+    super().__init__(idx, score, output_procs)
     self.words = words
     self.vocab = vocab
 
