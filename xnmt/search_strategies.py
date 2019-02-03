@@ -10,7 +10,7 @@ from xnmt import batchers, logger
 from xnmt.modelparts import decoders
 from xnmt.length_norm import NoNormalization, LengthNormalization
 from xnmt.persistence import Serializable, serializable_init, bare
-from xnmt.vocabs import Vocab
+from xnmt.vocabs import Vocab, RnngVocab
 
 
 SearchOutput = namedtuple('SearchOutput', ['word_ids', 'attentions', 'score', 'logsoftmaxes', 'state', 'mask'])
@@ -138,12 +138,13 @@ class BeamSearch(Serializable, SearchStrategy):
 
   def generate_output(self,
                       translator: 'xnmt.models.translators.AutoRegressiveTranslator',
-                      initial_state: decoders.AutoRegressiveDecoderState,
+                      initial_state: decoders.DecoderState,
                       src_length: Optional[numbers.Integral] = None) -> List[SearchOutput]:
     # TODO(philip30): can only do single decoding, not batched
     active_hyp = [self.Hypothesis(0, None, None, None)]
     completed_hyp = []
     for length in range(self.max_len):
+      # TODO: Is this exit condition really leigt?
       if len(completed_hyp) >= self.beam_size:
         break
       # Expand hyp
@@ -157,7 +158,9 @@ class BeamSearch(Serializable, SearchStrategy):
           prev_state = initial_state
 
         # We have a complete hyp ending with </s>
-        if prev_word == Vocab.ES:
+        #if prev_word == Vocab.ES:
+        #print('prev_word: %s    prev_state stack size: %d    prev_state terms: %d' % (str(prev_word), len(prev_state.stack), len(prev_state.terminals)))
+        if prev_word is not None and prev_word.action == RnngVocab.REDUCE and len(prev_state.stack) == 1:
           completed_hyp.append(hyp)
           continue
 
