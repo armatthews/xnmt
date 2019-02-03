@@ -48,7 +48,7 @@ class InputReader(object):
     """
     return False
 
-  def make_sent(self, **kwargs) --> sent.Sentence:
+  def make_sent(self, **kwargs) -> sent.Sentence:
     """
     Returns a sentence of the appropriate type, given the input reader
 
