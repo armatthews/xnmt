@@ -157,16 +157,16 @@ class BeamSearch(Serializable, SearchStrategy):
           prev_word = None
           prev_state = initial_state
 
-        # We have a complete hyp ending with </s>
-        #if prev_word == Vocab.ES:
-        #print('prev_word: %s    prev_state stack size: %d    prev_state terms: %d' % (str(prev_word), len(prev_state.stack), len(prev_state.terminals)))
-        if prev_word is not None and prev_word.action == RnngVocab.REDUCE and len(prev_state.stack) == 1:
+        # We have a complete hypothesis
+        if hyp.output is not None and hyp.output.state.is_complete():
           completed_hyp.append(hyp)
           continue
 
         # Find the k best words at the next time step
         current_output = translator.add_input(prev_word, prev_state)
         top_words, top_scores = translator.best_k(current_output, self.beam_size, normalize_scores=True)
+        assert len(top_words) == len(top_scores)
+        assert len(top_words) > 0
 
         # Queue next states
         for cur_word, score in zip(top_words, top_scores):
@@ -179,6 +179,7 @@ class BeamSearch(Serializable, SearchStrategy):
 
     # There is no hyp that reached </s>
     if len(completed_hyp) == 0:
+      assert len(active_hyp) > 0
       completed_hyp = active_hyp
 
     # Length Normalization
@@ -187,7 +188,7 @@ class BeamSearch(Serializable, SearchStrategy):
 
     # Take only the one best, if that's what was desired
     if self.one_best:
-      hyp_and_score = [hyp_and_score[0]]
+      hyp_and_score = hyp_and_score[:1]
 
     # Backtracing + Packing outputs
     results = []

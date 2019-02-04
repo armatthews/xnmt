@@ -39,19 +39,28 @@ class DecoderState(object):
   def as_vector(self):
     raise NotImplementedError('must be implemented by subclass')
 
+  def is_complete(self):
+    raise NotImplementedError('must be implemented by subclass')
+
 class AutoRegressiveDecoderState(DecoderState):
   """A state holding all the information needed for AutoRegressiveDecoder
 
   Args:
     rnn_state: a DyNet RNN state
     context: a DyNet expression
+    complete: boolean representing whether this state represents a complete
+              sentence
   """
-  def __init__(self, rnn_state=None, context=None):
+  def __init__(self, rnn_state=None, context=None, complete=False):
     self.rnn_state = rnn_state
     self.context = context
+    self.complete = complete
 
   def as_vector(self):
     return self.rnn_state.output()
+
+  def is_complete(self):
+    return self.done
 
 class AutoRegressiveDecoder(Decoder, Serializable):
   """
@@ -131,14 +140,18 @@ class AutoRegressiveDecoder(Decoder, Serializable):
     Returns:
       The updated decoder state.
     """
+    assert not mlp_dec_state.is_complete(), 'Attempt to add to a complete hypothesis!'
     trg_embedding = self.embedder.embed(trg_word)
     inp = trg_embedding
     if self.input_feeding:
       inp = dy.concatenate([inp, mlp_dec_state.context])
     rnn_state = mlp_dec_state.rnn_state
     if self.truncate_dec_batches: rnn_state, inp = batchers.truncate_batches(rnn_state, inp)
-    return AutoRegressiveDecoderState(rnn_state=rnn_state.add_input(inp),
-                                      context=mlp_dec_state.context)
+    new_state =  AutoRegressiveDecoderState(
+        rnn_state=rnn_state.add_input(inp),
+        context=mlp_dec_state.context,
+        complete=(trg_word == Vocab.ES))
+    return new_state
 
   def _calc_transform(self, mlp_dec_state: AutoRegressiveDecoderState) -> dy.Expression:
     h = dy.concatenate([mlp_dec_state.rnn_state.output(), mlp_dec_state.context])
@@ -183,6 +196,7 @@ class RnngDecoderState(object):
       return True
 
     if len(self.stack) >= RnngDecoderState.MaxOpenNTs:
+      if a.action == RnngVocab.NT:
         return True
 
     if len(self.stack) == 0:
@@ -199,6 +213,9 @@ class RnngDecoderState(object):
 
   def as_vector(self):
     return self.stack_emb.output()
+
+  def is_complete(self):
+    return len(self.terminals) > 0 and len(self.stack) == 0
 
   def copy(self):
     r = RnngDecoderState(stack_emb=self.stack_emb)
@@ -316,6 +333,7 @@ class RnngDecoder(Decoder, Serializable):
   def perform_nt(self, dec_state, nt_id):
     assert not dec_state.is_forbidden(RnngAction(RnngVocab.NT, nt_id))
     nt_emb = self.embedder.embed_nt(nt_id)
+    nt_emb = self.word_emb_transform.transform(nt_emb)
 
     new_state = dec_state.copy()
     new_state.stack.append(RnngStackElement(nt_id, [], dec_state.stack_emb))
@@ -329,6 +347,7 @@ class RnngDecoder(Decoder, Serializable):
     new_state = dec_state.copy()
     nt_id, children, prev_state = new_state.stack.pop()
     nt_emb = self.embedder.embed_nt(nt_id)
+    nt_emb = self.word_emb_transform.transform(nt_emb)
 
     fwd_children = expression_seqs.ExpressionSequence([nt_emb] + children)
     rev_children = expression_seqs.ExpressionSequence([nt_emb] + children[::-1])
@@ -347,9 +366,11 @@ class RnngDecoder(Decoder, Serializable):
   def add_input(self, dec_state : RnngDecoderState, word : RnngAction):
     # TODO: Are these two lines needed at training time, but required to
     # not be there for test time?
-    #assert len(word) == 1
-    #word = word[0]
+    if batchers.is_batched(word):
+      assert len(word) == 1
+      word = word[0]
     assert not dec_state.is_forbidden(word)
+    assert not dec_state.is_complete(), 'Attempt to add to a complete hypothesis!'
 
     if word.action == RnngVocab.SHIFT:
       return self.perform_shift(dec_state, word.subaction)
@@ -378,20 +399,25 @@ class RnngDecoder(Decoder, Serializable):
 
     best_actions = []
     for term, score in zip(*best_terms):
+      assert term < len(self.vocab.term_vocab)
       action = RnngAction(RnngVocab.SHIFT, term)
       total_score = shift_score + score
-      heapq.heappush(best_actions, (total_score, action))
+      if not dec_state.is_forbidden(action):
+        heapq.heappush(best_actions, (total_score, action))
     for nt, score in zip(*best_nts):
+      assert nt < len(self.vocab.nt_vocab)
       action = RnngAction(RnngVocab.NT, nt)
       total_score = nt_score + score
-      heapq.heappush(best_actions, (total_score, action))
+      if not dec_state.is_forbidden(action):
+        heapq.heappush(best_actions, (total_score, action))
     action = RnngAction(RnngVocab.REDUCE, None)
     total_score = reduce_score
     heapq.heappush(best_actions, (total_score, action))
 
     r_actions = []
     r_scores = []
-    for score, action in heapq.nlargest(k, best_actions):
+    while len(r_actions) < k and len(best_actions) > 0:
+      score, action = heapq.heappop(best_actions)
       if not dec_state.is_forbidden(action):
         r_actions.append(action)
         r_scores.append(score)
@@ -410,7 +436,7 @@ class RnngDecoder(Decoder, Serializable):
             {".hidden_dim", ".comp_lstm_fwd.hidden_dim"},
             {".hidden_dim", ".comp_lstm_rev.hidden_dim"},
             {".hidden_dim", ".state_transform.input_dim"},
-            {".hidden_dim", ".state_transform.aux_input_dim"},
+            {".input_dim", ".state_transform.aux_input_dim"},
             {".hidden_dim", ".state_transform.output_dim"},
             {".hidden_dim", ".compose_transform.input_dim"},
             {".hidden_dim", ".compose_transform.output_dim"}]
