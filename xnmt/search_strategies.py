@@ -144,12 +144,16 @@ class BeamSearch(Serializable, SearchStrategy):
     active_hyp = [self.Hypothesis(0, None, None, None)]
     completed_hyp = []
     for length in range(self.max_len):
-      # TODO: Is this exit condition really leigt?
+      # TODO: Is this exit condition really legit?
       if len(completed_hyp) >= self.beam_size:
+        # TODO: Filter active hyps to only those with scores
+        # >= kth best. If there are none, then break.
         break
+
       # Expand hyp
       new_set = []
       for hyp in active_hyp:
+        # Note: prev_word has *not* yet been added to prev_state
         if length > 0:
           prev_word = hyp.word
           prev_state = hyp.output.state
@@ -158,12 +162,13 @@ class BeamSearch(Serializable, SearchStrategy):
           prev_state = initial_state
 
         # We have a complete hypothesis
-        if hyp.output is not None and hyp.output.state.is_complete():
+        if prev_state.is_complete():
           completed_hyp.append(hyp)
           continue
 
         # Find the k best words at the next time step
-        current_output = translator.add_input(prev_word, prev_state)
+        if prev_word is not None:
+          current_output = translator.add_input(prev_word, prev_state)
         top_words, top_scores = translator.best_k(current_output, self.beam_size, normalize_scores=True)
         assert len(top_words) == len(top_scores)
         assert len(top_words) > 0
