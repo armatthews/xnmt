@@ -5,6 +5,7 @@ The main responsibilities are data structures for holding such outputs, and code
 strings.
 """
 
+import re
 from typing import List, Union
 
 from xnmt.persistence import Serializable, serializable_init
@@ -35,6 +36,8 @@ class OutputProcessor(object):
           procs.append(JoinBpeTextOutputProcessor())
         elif spec == "join-piece":
           procs.append(JoinPieceTextOutputProcessor())
+        elif spec == "rnng":
+          procs.append(RnngOutputProcessor())
       return procs
     else:
       return spec
@@ -90,3 +93,19 @@ class JoinPieceTextOutputProcessor(OutputProcessor, Serializable):
   def process(self, s: str) -> str:
     return s.replace(" ", "").replace(self.space_token, " ").strip()
 
+class RnngOutputProcessor(OutputProcessor, Serializable):
+  """
+  Filters all but SHIFT actions from an RNNG output.
+  """
+  yaml_tag = "!RnngOutputProcessor"
+  @serializable_init
+  def __init__(self) -> None:
+    pass
+
+  def process(self, s: str) -> str:
+    actions = s.split()
+    actions = [a for a in actions if a.startswith('SHIFT')]
+    for action in actions:
+      assert action.startswith('SHIFT(') and action.endswith(')')
+    actions = [a[6:-1] for a in actions]
+    return ' '.join(actions)

@@ -129,7 +129,7 @@ class RnngVocab(Serializable):
       term = word.split('(', 1)[1][:-1]
       return RnngAction(RnngVocab.SHIFT, self.term_vocab.convert(term))
     else:
-      raise 'Invalid RNNG input word: %s. Should be one of SHIFT(terminal), NT(non-terminal), or REDUCE'
+      raise 'Invalid RNNG input word: %s. Should be one of SHIFT(terminal), NT(non-terminal), or REDUCE' % str(word)
 
   def convert_terminal(self, word):
     return self.term_vocab.convert(term)

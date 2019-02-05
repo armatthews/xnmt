@@ -161,14 +161,13 @@ class BeamSearch(Serializable, SearchStrategy):
           prev_word = None
           prev_state = initial_state
 
+        current_output = translator.add_input(prev_word, prev_state)
         # We have a complete hypothesis
-        if prev_state.is_complete():
+        if current_output.state.is_complete():
           completed_hyp.append(hyp)
           continue
 
         # Find the k best words at the next time step
-        if prev_word is not None:
-          current_output = translator.add_input(prev_word, prev_state)
         top_words, top_scores = translator.best_k(current_output, self.beam_size, normalize_scores=True)
         assert len(top_words) == len(top_scores)
         assert len(top_words) > 0

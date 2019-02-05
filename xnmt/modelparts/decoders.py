@@ -9,7 +9,7 @@ from xnmt import batchers, param_collections, expression_seqs
 from xnmt.modelparts import bridges, transforms, scorers, embedders
 from xnmt.transducers import recurrent
 from xnmt.persistence import serializable_init, Serializable, bare, Ref
-from xnmt.vocabs import RnngVocab, RnngAction
+from xnmt.vocabs import Vocab, RnngVocab, RnngAction
 
 class Decoder(object):
   """
@@ -60,7 +60,7 @@ class AutoRegressiveDecoderState(DecoderState):
     return self.rnn_state.output()
 
   def is_complete(self):
-    return self.done
+    return self.complete
 
 class AutoRegressiveDecoder(Decoder, Serializable):
   """
