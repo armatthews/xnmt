@@ -403,16 +403,16 @@ class RnngDecoder(Decoder, Serializable):
       action = RnngAction(RnngVocab.SHIFT, term)
       total_score = shift_score + score
       if not dec_state.is_forbidden(action):
-        heapq.heappush(best_actions, (total_score, action))
+        heapq.heappush(best_actions, (-total_score, action))
     for nt, score in zip(*best_nts):
       assert nt < len(self.vocab.nt_vocab)
       action = RnngAction(RnngVocab.NT, nt)
       total_score = nt_score + score
       if not dec_state.is_forbidden(action):
-        heapq.heappush(best_actions, (total_score, action))
+        heapq.heappush(best_actions, (-total_score, action))
     action = RnngAction(RnngVocab.REDUCE, None)
     total_score = reduce_score
-    heapq.heappush(best_actions, (total_score, action))
+    heapq.heappush(best_actions, (-total_score, action))
 
     r_actions = []
     r_scores = []
@@ -420,7 +420,7 @@ class RnngDecoder(Decoder, Serializable):
       score, action = heapq.heappop(best_actions)
       if not dec_state.is_forbidden(action):
         r_actions.append(action)
-        r_scores.append(score)
+        r_scores.append(-score)
     return r_actions, r_scores
 
   def shared_params(self):
