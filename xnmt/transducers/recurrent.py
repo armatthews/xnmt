@@ -413,37 +413,37 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
                weightnoise_std=Ref("exp_global.weight_noise", default=0.0),
                param_init=Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init=Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer)),
+               transform=bare(transforms.Linear, bias=False),
                inside_fwd_layers=None, inside_rev_layers=None,
                outside_left_layers=None, outside_right_layers=None, mlps=None):
     self.num_layers = layers
-    assert input_dim == hidden_dim, 'To get this to work without input_dim == hidden_dim, I will need to add a linear transform for all the inputs.'
     self.hidden_dim = hidden_dim
     self.dropout_rate = dropout
     self.weightnoise_std = weightnoise_std
-    assert hidden_dim % 2 == 0
+    self.transform = transform
     self.inside_fwd_layers = self.add_serializable_component("inside_fwd_layers", inside_fwd_layers, lambda: [
-      UniLSTMSeqTransducer(input_dim=input_dim if i == 0 else hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
+      UniLSTMSeqTransducer(input_dim=hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
                            weightnoise_std=weightnoise_std,
                            param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
                            bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in
       range(layers)])
 
     self.inside_rev_layers = self.add_serializable_component("inside_rev_layers", inside_rev_layers, lambda: [
-      UniLSTMSeqTransducer(input_dim=input_dim if i == 0 else hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
+      UniLSTMSeqTransducer(input_dim=hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
                            weightnoise_std=weightnoise_std,
                            param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
                            bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in
       range(layers)])
 
     self.outside_left_layers = self.add_serializable_component("outside_left_layers", outside_left_layers, lambda: [
-      UniLSTMSeqTransducer(input_dim=input_dim if i == 0 else hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
+      UniLSTMSeqTransducer(input_dim=hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
                            weightnoise_std=weightnoise_std,
                            param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
                            bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in
       range(layers)])
 
     self.outside_right_layers = self.add_serializable_component("outside_right_layers", outside_right_layers, lambda: [
-      UniLSTMSeqTransducer(input_dim=input_dim if i == 0 else hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
+      UniLSTMSeqTransducer(input_dim=hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
                            weightnoise_std=weightnoise_std,
                            param_init=param_init[i] if isinstance(param_init, Sequence) else param_init,
                            bias_init=bias_init[i] if isinstance(bias_init, Sequence) else bias_init) for i in
@@ -460,7 +460,7 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
     self._final_states = None
 
   def get_final_states(self) -> List[transducers.FinalTransducerState]:
-    z = dy.zeros(2 * self.hidden_dim)
+    z = dy.zeros(self.hidden_dim)
     # TODO: Maybe this should just be a linear transform of the ROOT's inside vector
     return [transducers.FinalTransducerState(z, z)]
     return self._final_states
@@ -509,9 +509,16 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
       new_children.append(new_child)
     return SyntaxTree(summary, new_children)
 
+  def transform_labels(self, tree):
+    new_label = self.transform.transform(tree.label)
+    children = [self.transform_labels(child) for child in tree.children]
+    return SyntaxTree(new_label, children)
+
   def embed_tree(self, tree: 'SyntaxTree'):
     root_outside = dy.zeros(self.hidden_dim)
     for i in range(self.layers):
+      if i == 0 and self.input_dim != self.hidden_dim:
+        tree = self.transform_labels(tree)
       inside_tree = self.embed_subtree_inside(tree, i)
       outside_tree = self.embed_subtree_outside(tree, [], [], root_outside, i)
       tree = self.zip_trees([inside_tree, outside_tree])
@@ -548,3 +555,7 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
       assert len(output) == 1
       output = output[0] # XXX
       return expression_seqs.ExpressionSequence(output)
+
+  def shared_params(self):
+    return [{".input_dim", ".transform.input_dim"},
+            {".hidden_dim", ".transform.output_dim"}]
