@@ -414,6 +414,8 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
                param_init=Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init=Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer)),
                transform=bare(transforms.Linear, bias=False),
+               root_main_transform=bare(transforms.NonLinear),
+               root_cell_transform=bare(transforms.NonLinear),
                inside_fwd_layers=None, inside_rev_layers=None,
                outside_left_layers=None, outside_right_layers=None, mlps=None):
     self.num_layers = layers
@@ -421,6 +423,8 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
     self.dropout_rate = dropout
     self.weightnoise_std = weightnoise_std
     self.transform = transform
+    self.root_main_transform = root_main_transform
+    self.root_cell_transform = root_cell_transform
     self.inside_fwd_layers = self.add_serializable_component("inside_fwd_layers", inside_fwd_layers, lambda: [
       UniLSTMSeqTransducer(input_dim=hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
                            weightnoise_std=weightnoise_std,
@@ -457,13 +461,14 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
 
   @handle_xnmt_event
   def on_start_sent(self, src):
-    self._final_states = None
+    self.root_emb = None
 
   def get_final_states(self) -> List[transducers.FinalTransducerState]:
-    z = dy.zeros(self.hidden_dim)
-    # TODO: Maybe this should just be a linear transform of the ROOT's inside vector
-    return [transducers.FinalTransducerState(z, z)]
-    return self._final_states
+    main = self.root_main_transform.transform(self.root_emb)
+    cell = self.root_cell_transform.transform(self.root_emb)
+    main = dy.concatenate([main, cell])
+    cell = main
+    return [transducers.FinalTransducerState(main, cell)]
 
   def embed_subtree_inside(self, tree: 'SyntaxTree', layer_idx=0):
     if len(tree.children) == 0:
@@ -548,6 +553,7 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
   def transduce(self, trees: 'SyntaxTree') -> 'expression_seqs.ExpressionSequence':
     if type(trees) != list:
       tree = self.embed_tree(trees)
+      self.root_emb = tree.label
       return self.linearize(tree)
     else:
       assert len(trees) == 1
@@ -558,4 +564,8 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
 
   def shared_params(self):
     return [{".input_dim", ".transform.input_dim"},
-            {".hidden_dim", ".transform.output_dim"}]
+            {".hidden_dim", ".transform.output_dim"},
+            {".hidden_dim", ".root_main_transform.input_dim"},
+            {".hidden_dim", ".root_main_transform.output_dim"},
+            {".hidden_dim", ".root_cell_transform.input_dim"},
+            {".hidden_dim", ".root_cell_transform.output_dim"}]
