@@ -475,14 +475,46 @@ class SyntaxTreeEmbedder(Embedder, Serializable):
     self.emb_dim = emb_dim
     self.train = False
     param_collection = param_collections.ParamManager.my_params(self)
-    self.nt_vocab_size = len(src_reader.nt_vocab) if not nt_vocab_size else nt_vocab_size
-    self.term_vocab_size = len(src_reader.term_vocab) if not term_vocab_size else term_vocab_size
+    self.term_vocab_size, self.nt_vocab_size = self.choose_vocab_size(
+        term_vocab_size,
+        nt_vocab_size,
+        None,
+        None,
+        yaml_path,
+        src_reader)
     self.save_processed_arg("nt_vocab_size", self.nt_vocab_size)
     self.save_processed_arg("term_vocab_size", self.term_vocab_size)
     self.nt_embeddings = param_collection.add_lookup_parameters((self.nt_vocab_size, self.emb_dim),
                              init=param_init.initializer((self.nt_vocab_size, self.emb_dim), is_lookup=True))
     self.term_embeddings = param_collection.add_lookup_parameters((self.term_vocab_size, self.emb_dim),
                                init=param_init.initializer((self.term_vocab_size, self.emb_dim), is_lookup=True))
+
+  def choose_vocab_size(self,
+                        term_vocab_size: numbers.Integral,
+                        nt_vocab_size: numbers.Integral,
+                        term_vocab: vocabs.Vocab,
+                        nt_vocab: vocabs.Vocab,
+                        yaml_path: Path,
+                        src_reader: input_readers.InputReader):
+
+    if 'src_embedder' in yaml_path:
+      if src_reader is not None:
+        if not term_vocab:
+          term_vocab = getattr(src_reader, 'term_vocab', None)
+        if not nt_vocab:
+          nt_vocab = getattr(src_reader, 'nt_vocab', None)
+
+    if term_vocab_size is None and term_vocab is not None:
+      term_vocab_size = len(term_vocab)
+    if nt_vocab_size is None and nt_vocab is not None:
+      nt_vocab_size = len(nt_vocab)
+
+    if term_vocab_size is None:
+      raise ValueError('Could not determine src_embedder\'s terminal vocab size.')
+    if nt_vocab_size is None:
+      raise ValueError('Could not determine src_embedder\'s non-terminal vocab size.')
+
+    return term_vocab_size, nt_vocab_size
 
   @events.handle_xnmt_event
   def on_set_train(self, val):

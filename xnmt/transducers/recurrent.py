@@ -419,12 +419,14 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
                inside_fwd_layers=None, inside_rev_layers=None,
                outside_left_layers=None, outside_right_layers=None, mlps=None):
     self.num_layers = layers
+    self.input_dim = input_dim
     self.hidden_dim = hidden_dim
     self.dropout_rate = dropout
     self.weightnoise_std = weightnoise_std
     self.transform = transform
     self.root_main_transform = root_main_transform
     self.root_cell_transform = root_cell_transform
+
     self.inside_fwd_layers = self.add_serializable_component("inside_fwd_layers", inside_fwd_layers, lambda: [
       UniLSTMSeqTransducer(input_dim=hidden_dim, hidden_dim=hidden_dim, dropout=dropout,
                            weightnoise_std=weightnoise_std,
@@ -466,8 +468,6 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
   def get_final_states(self) -> List[transducers.FinalTransducerState]:
     main = self.root_main_transform.transform(self.root_emb)
     cell = self.root_cell_transform.transform(self.root_emb)
-    main = dy.concatenate([main, cell])
-    cell = main
     return [transducers.FinalTransducerState(main, cell)]
 
   def embed_subtree_inside(self, tree: 'SyntaxTree', layer_idx=0):
