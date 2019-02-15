@@ -130,6 +130,8 @@ class AuxNonLinear(NonLinear, Serializable):
     aux_input_dim: auxiliary input dimension.
                    The actual input dimension is aux_input_dim + input_dim.
                    This is useful for when you want to do something like input feeding.
+    num_aux_inputs: How many auxiliary inputs to expect. Default value is 1.
+                    All auxiliary inputs must have the same dimensionality.
     bias: whether to add a bias
     activation: One of ``tanh``, ``relu``, ``sigmoid``, ``elu``, ``selu``, ``asinh`` or ``identity``.
     param_init: how to initialize weight matrices
@@ -143,12 +145,14 @@ class AuxNonLinear(NonLinear, Serializable):
                input_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                output_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                aux_input_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               num_aux_inputs: numbers.Integral = 1,
                bias: bool = True,
                activation: str = 'tanh',
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
     original_input_dim = input_dim
-    input_dim += aux_input_dim
+    input_dim += num_aux_inputs * aux_input_dim
+    self.num_aux_inputs = num_aux_inputs
     super().__init__(
       input_dim=input_dim,
       output_dim=output_dim,
