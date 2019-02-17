@@ -222,7 +222,7 @@ class RnngDecoderState(object):
       terms_vec = self.term_lstm_state.output()
       r += terms_vec
 
-    if self.action_lstm_state i snot None:
+    if self.action_lstm_state is not None:
       actions_vec = self.action_lstm_state.output()
       r += action_vec
 
@@ -264,7 +264,7 @@ class RnngDecoder(Decoder, Serializable):
                compose_transform=bare(transforms.NonLinear),
                state_transform=bare(transforms.AuxNonLinear),
                word_emb_transform=bare(transforms.Linear, bias=False),
-               use_term_lstm=False
+               use_term_lstm=False,
                use_action_lstm=False):
 
     #model = param_collections.ParamManager.my_params(self)
@@ -372,11 +372,11 @@ class RnngDecoder(Decoder, Serializable):
     new_state.stack[-1].children.append(word_emb)
     new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, word_emb)
 
-    if use_term_lstm:
+    if self.use_term_lstm:
       new_state.terminals.append(word_id)
       new_state.term_lstm_state = self.term_lstm_push(dec_state.term_lstm_state, word_emb)
 
-    if use_action_lstm:
+    if self.use_action_lstm:
       new_state.actions.append(RnngAction(RnngVocab.SHIFT, word_id))
       new_state.action_lstm_state = self.action_lstm_push(dec_state.action_lstm_state, word_emb)
     return new_state
@@ -390,7 +390,7 @@ class RnngDecoder(Decoder, Serializable):
     new_state.stack.append(RnngStackElement(nt_id, [], dec_state.stack_lstm_state))
     new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, nt_emb)
 
-    if use_action_lstm:
+    if self.use_action_lstm:
       new_state.actions.append(RnngAction(RnngVocab.NT, nt_id))
       new_state.action_lstm_state = self.action_lstm_push(dec_state.action_lstm_state, nt_emb)
     return new_state
@@ -421,7 +421,7 @@ class RnngDecoder(Decoder, Serializable):
       new_state.stack[-1].children.append(composed)
     new_state.stack_lstm_state = self.stack_lstm_push(prev_state, composed)
 
-    if use_action_lstm:
+    if self.use_action_lstm:
       reduce_emb = self.embedder.embed(action)
       reduce_emb = self.word_emb_transform.transform(reduce_emb)
       new_state.actions.append(action)
