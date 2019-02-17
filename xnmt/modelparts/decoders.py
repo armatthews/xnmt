@@ -224,7 +224,7 @@ class RnngDecoderState(object):
 
     if self.action_lstm_state is not None:
       actions_vec = self.action_lstm_state.output()
-      r += action_vec
+      r += actions_vec
 
     return r
 
@@ -249,7 +249,6 @@ class RnngDecoder(Decoder, Serializable):
   @serializable_init
   def __init__(self, input_dim = Ref("exp_global.default_layer_dim"),
                hidden_dim = Ref("exp_global.default_layer_dim"),
-               dropout = 0.0,
                embedder: embedders.Embedder = bare(embedders.RnngEmbedder),
                action_scorer=bare(scorers.Softmax, vocab_size=RnngVocab.NUM_ACTIONS),
                term_scorer = bare(scorers.Softmax),
@@ -270,7 +269,6 @@ class RnngDecoder(Decoder, Serializable):
     #model = param_collections.ParamManager.my_params(self)
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
-    self.dropout = dropout
     self.embedder = embedder
     self.action_scorer = action_scorer
     self.term_scorer = term_scorer
