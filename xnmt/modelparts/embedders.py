@@ -545,10 +545,16 @@ class RnngEmbedder(Embedder, Serializable):
   def __init__(self,
                term_emb=bare(SimpleWordEmbedder),
                nt_emb=bare(SimpleWordEmbedder),
+               action_emb=bare(SimpleWordEmbedder, vocab_size=vocabs.RnngVocab.NUM_ACTIONS),
                vocab=None):
     self.term_emb = term_emb
     self.nt_emb = nt_emb
+    self.action_emb = action_emb
     self.vocab = vocab
+
+  def shared_params(self):
+    return [{".term_emb.emb_dim", ".nt_emb.emb_dim"},
+            {".term_emb.emb_dim", ".action_emb.emb_dim"}]
 
   @events.handle_xnmt_event
   def on_set_train(self, val):
@@ -565,12 +571,14 @@ class RnngEmbedder(Embedder, Serializable):
     emb = None
     if action == RnngVocab.NONE:
       assert wid == None
+      assert False, 'Why are you trying to embed RnngVocab.NONE?'
     elif action == RnngVocab.SHIFT:
       emb = self.term_emb.embed(wid)
     elif action == RnngVocab.NT:
       emb = self.nt_emb.embed(wid)
     elif action == RnngVocab.REDUCE:
       assert wid == None
+      emb = self.action_emb.embed(RnngVocab.REDUCE)
     else:
       assert False
     return (action, emb)

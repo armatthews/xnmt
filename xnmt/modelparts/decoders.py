@@ -182,10 +182,13 @@ RnngStackElement = namedtuple('RnngStackElement', 'nt_id, children, prev_state')
 class RnngDecoderState(object):
   MaxOpenNTs = 100
 
-  def __init__(self, stack_emb=None):
+  def __init__(self, stack_lstm_state=None, term_lstm_state=None, action_lstm_state=None):
     self.stack = [] # Stack of RnngStackElements
     self.terminals = [] # Generated terminals
-    self.stack_emb = stack_emb
+    self.actions = [] # Generated action sequence
+    self.term_lstm_state = term_lstm_state
+    self.action_lstm_state = action_lstm_state
+    self.stack_lstm_state = stack_lstm_state
     self.context = None
 
   def __str__(self):
@@ -212,18 +215,32 @@ class RnngDecoderState(object):
     return False
 
   def as_vector(self):
-    return self.stack_emb.output()
+    stack_vec = self.stack_lstm_state.output()
+    r = stack_vec
+
+    if self.term_lstm_state is not None:
+      terms_vec = self.term_lstm_state.output()
+      r += terms_vec
+
+    if self.action_lstm_state i snot None:
+      actions_vec = self.action_lstm_state.output()
+      r += action_vec
+
+    return r
 
   def is_complete(self):
     return len(self.terminals) > 0 and len(self.stack) == 0
 
   def copy(self):
-    r = RnngDecoderState(stack_emb=self.stack_emb)
+    r = RnngDecoderState(stack_lstm_state=self.stack_lstm_state,
+                         term_lstm_state=self.term_lstm_state,
+                         action_lstm_state=self.action_lstm_state)
     # We need to create a copy of the "children" bits of the
     # RnngStackElements instead of just a reference to the same list.
     for nt_id, children, prev_state in self.stack:
       r.stack.append(RnngStackElement(nt_id, children[:], prev_state))
     r.terminals = self.terminals[:]
+    r.actions = self.actions[:]
     return r
 
 class RnngDecoder(Decoder, Serializable):
@@ -235,15 +252,20 @@ class RnngDecoder(Decoder, Serializable):
                dropout = 0.0,
                embedder: embedders.Embedder = bare(embedders.RnngEmbedder),
                action_scorer=bare(scorers.Softmax, vocab_size=RnngVocab.NUM_ACTIONS),
-               term_scorer = bare(scorers.Softmax), nt_scorer = bare(scorers.Softmax),
+               term_scorer = bare(scorers.Softmax),
+               nt_scorer = bare(scorers.Softmax),
                bridge: bridges.Bridge = bare(bridges.CopyBridge),
                vocab=None,
+               term_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
+               action_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                stack_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                comp_lstm_fwd=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                comp_lstm_rev=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                compose_transform=bare(transforms.NonLinear),
                state_transform=bare(transforms.AuxNonLinear),
-               word_emb_transform=bare(transforms.Linear, bias=False)):
+               word_emb_transform=bare(transforms.Linear, bias=False),
+               use_term_lstm=False
+               use_action_lstm=False):
 
     #model = param_collections.ParamManager.my_params(self)
     self.input_dim = input_dim
@@ -257,7 +279,12 @@ class RnngDecoder(Decoder, Serializable):
 
     self.vocab = vocab
 
+    self.use_term_lstm = use_term_lstm
+    self.use_action_lstm = use_action_lstm
+
     # LSTMs
+    self.term_lstm = term_lstm if use_term_lstm else None
+    self.action_lstm = action_lstm if use_action_lstm else None
     self.stack_lstm = stack_lstm
     self.comp_lstm_fwd = comp_lstm_fwd
     self.comp_lstm_rev = comp_lstm_rev
@@ -313,10 +340,27 @@ class RnngDecoder(Decoder, Serializable):
   def calc_log_prob(self, calc_scores_logsoftmax : dy.Expression):
     raise NotImplementedError()
 
-  def stack_lstm_push(self, state_emb : dy.Expression, word_emb : dy.Expression):
-    c, h = self.stack_lstm.add_input_to_prev(state_emb, word_emb)
-    r = recurrent.UniLSTMState(self.stack_lstm, state_emb, c=c, h=h)
+  def lstm_push(self, lstm: recurrent.UniLSTMSeqTransducer, state: recurrent.UniLSTMState, word_emb: dy.Expression):
+    c, h = lstm.add_input_to_prev(state, word_emb)
+    r = recurrent.UniLSTMState(lstm, state, c=c, h=h)
     return r
+
+  def stack_lstm_push(self,
+                      stack_lstm_state: recurrent.UniLSTMState,
+                      word_emb: dy.Expression):
+    return self.lstm_push(self.stack_lstm, stack_lstm_state, word_emb)
+
+  def term_lstm_push(self,
+                     term_lstm_state: recurrent.UniLSTMState,
+                     word_emb: dy.Expression):
+    assert self.use_term_lstm
+    return self.lstm_push(self.term_lstm, term_lstm_state, word_emb)
+
+  def action_lstm_push(self,
+                       action_lstm_state: recurrent.UniLSTMState,
+                       word_emb: dy.Expression):    
+    assert self.use_action_lstm
+    return self.lstm_push(self.action_lstm, action_lstm_state, word_emb)
 
   def perform_shift(self, dec_state : RnngDecoderState, word_id : numbers.Integral):
     assert not dec_state.is_forbidden(RnngAction(RnngVocab.SHIFT, word_id))
@@ -326,8 +370,15 @@ class RnngDecoder(Decoder, Serializable):
 
     new_state = dec_state.copy()
     new_state.stack[-1].children.append(word_emb)
-    new_state.stack_emb = self.stack_lstm_push(dec_state.stack_emb, word_emb)
-    new_state.terminals.append(word_id)
+    new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, word_emb)
+
+    if use_term_lstm:
+      new_state.terminals.append(word_id)
+      new_state.term_lstm_state = self.term_lstm_push(dec_state.term_lstm_state, word_emb)
+
+    if use_action_lstm:
+      new_state.actions.append(RnngAction(RnngVocab.SHIFT, word_id))
+      new_state.action_lstm_state = self.action_lstm_push(dec_state.action_lstm_state, word_emb)
     return new_state
 
   def perform_nt(self, dec_state, nt_id):
@@ -336,12 +387,26 @@ class RnngDecoder(Decoder, Serializable):
     nt_emb = self.word_emb_transform.transform(nt_emb)
 
     new_state = dec_state.copy()
-    new_state.stack.append(RnngStackElement(nt_id, [], dec_state.stack_emb))
-    new_state.stack_emb = self.stack_lstm_push(dec_state.stack_emb, nt_emb)
+    new_state.stack.append(RnngStackElement(nt_id, [], dec_state.stack_lstm_state))
+    new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, nt_emb)
+
+    if use_action_lstm:
+      new_state.actions.append(RnngAction(RnngVocab.NT, nt_id))
+      new_state.action_lstm_state = self.action_lstm_push(dec_state.action_lstm_state, nt_emb)
     return new_state
 
+  def compose(self, nt_emb, children):
+    fwd_children = expression_seqs.ExpressionSequence([nt_emb] + children)
+    rev_children = expression_seqs.ExpressionSequence([nt_emb] + children[::-1])
+    fwd_lstm_out = self.comp_lstm_fwd.transduce([fwd_children])[-1]
+    rev_lstm_out = self.comp_lstm_rev.transduce([rev_children])[-1]
+    bidir_out = fwd_lstm_out + rev_lstm_out
+    composed = self.compose_transform.transform(bidir_out)
+    return composed
+
   def perform_reduce(self, dec_state : RnngDecoderState):
-    assert not dec_state.is_forbidden(RnngAction(RnngVocab.REDUCE, None))
+    action = RnngAction(RnngVocab.REDUCE, None)
+    assert not dec_state.is_forbidden(action)
     assert len(dec_state.stack) > 0
 
     new_state = dec_state.copy()
@@ -349,18 +414,18 @@ class RnngDecoder(Decoder, Serializable):
     nt_emb = self.embedder.embed_nt(nt_id)
     nt_emb = self.word_emb_transform.transform(nt_emb)
 
-    fwd_children = expression_seqs.ExpressionSequence([nt_emb] + children)
-    rev_children = expression_seqs.ExpressionSequence([nt_emb] + children[::-1])
-    fwd_lstm_out = self.comp_lstm_fwd.transduce([fwd_children])[-1]
-    rev_lstm_out = self.comp_lstm_rev.transduce([rev_children])[-1]
-    bidir_out = fwd_lstm_out + rev_lstm_out
-    composed = self.compose_transform.transform(bidir_out)
+    composed = self.compose(nt_emb, children)
 
     # For the last reduce of the sentence there will be no more stack
     if len(new_state.stack) > 0:
       new_state.stack[-1].children.append(composed)
-    new_state.stack_emb = self.stack_lstm_push(prev_state, composed)
+    new_state.stack_lstm_state = self.stack_lstm_push(prev_state, composed)
 
+    if use_action_lstm:
+      reduce_emb = self.embedder.embed(action)
+      reduce_emb = self.word_emb_transform.transform(reduce_emb)
+      new_state.actions.append(action)
+      new_state.action_lstm_state = self.action_lstm_push(dec_state.action_lstm_state, reduce_emb)
     return new_state
 
   def add_input(self, dec_state : RnngDecoderState, word : RnngAction):
@@ -384,7 +449,10 @@ class RnngDecoder(Decoder, Serializable):
       raise Exception()
 
   def initial_state(self, enc_final_states, ss_expr):
-    return RnngDecoderState(self.stack_lstm.initial_state())
+    stack_lstm_state = self.stack_lstm.initial_state()
+    term_lstm_state = self.term_lstm.initial_state() if self.use_term_lstm else None
+    action_lstm_state = self.action_lstm.initial_state() if self.use_action_lstm else None
+    return RnngDecoderState(stack_lstm_state, term_lstm_state, action_lstm_state)
 
   def best_k(self, dec_state: RnngDecoderState, k: numbers.Integral, normalize_scores: bool = False):
     state = self.calc_state(dec_state)
