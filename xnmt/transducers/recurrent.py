@@ -526,7 +526,7 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
         tree = self.transform_labels(tree)
       inside_tree = self.embed_subtree_inside(tree, i)
       outside_tree = self.embed_subtree_outside(tree, [], [], root_outside, i)
-      tree = self.zip_trees([inside_tree, outside_tree])
+      tree = self.zip_trees([inside_tree, outside_tree, tree])
     return tree
 
   def zip_trees(self, trees):
