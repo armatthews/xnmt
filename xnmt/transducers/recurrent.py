@@ -8,7 +8,7 @@ import dynet as dy
 
 
 from xnmt import expression_seqs, param_collections, param_initializers
-from xnmt.modelparts import transforms
+from xnmt.modelparts import transforms, attenders
 from xnmt.events import register_xnmt_handler, handle_xnmt_event
 from xnmt.transducers import base as transducers
 from xnmt.persistence import bare, Ref, Serializable, serializable_init, Path
@@ -254,7 +254,7 @@ class BiLSTMSeqTransducer(transducers.SeqTransducer, Serializable):
     hidden_dim (int): hidden dimension
     dropout (float): dropout probability
     weightnoise_std (float): weight noise standard deviation
-    param_init: a :class:`xnmt.param_init.ParamInitializer` or list of :class:`xnmt.param_init.ParamInitializer` objects 
+    param_init: a :class:`xnmt.param_init.ParamInitializer` or list of :class:`xnmt.param_init.ParamInitializer` objects
                 specifying how to initialize weight matrices. If a list is given, each entry denotes one layer.
     bias_init: a :class:`xnmt.param_init.ParamInitializer` or list of :class:`xnmt.param_init.ParamInitializer` objects
                specifying how to initialize bias vectors. If a list is given, each entry denotes one layer.
@@ -388,6 +388,13 @@ class CustomLSTMSeqTransducer(transducers.SeqTransducer, Serializable):
     return h
 
 from xnmt.sent import SyntaxTree
+def linearize(tree: SyntaxTree):
+  """Converts a SyntaxTree of vectors into a linear sequence of vectors"""
+  r = [tree.label]
+  for child in tree.children:
+    r += linearize(child)
+  return r
+
 class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
   """
   Args:
@@ -396,7 +403,7 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
     hidden_dim (int): hidden dimension
     dropout (float): dropout probability
     weightnoise_std (float): weight noise standard deviation
-    param_init: a :class:`xnmt.param_init.ParamInitializer` or list of :class:`xnmt.param_init.ParamInitializer` objects 
+    param_init: a :class:`xnmt.param_init.ParamInitializer` or list of :class:`xnmt.param_init.ParamInitializer` objects
                 specifying how to initialize weight matrices. If a list is given, each entry denotes one layer.
     bias_init: a :class:`xnmt.param_init.ParamInitializer` or list of :class:`xnmt.param_init.ParamInitializer` objects
                specifying how to initialize bias vectors. If a list is given, each entry denotes one layer.
@@ -470,7 +477,7 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
     cell = self.root_cell_transform.transform(self.root_emb)
     return [transducers.FinalTransducerState(main, cell)]
 
-  def embed_subtree_inside(self, tree: 'SyntaxTree', layer_idx=0):
+  def embed_subtree_inside(self, tree: SyntaxTree, layer_idx=0):
     if len(tree.children) == 0:
       return SyntaxTree(tree.label, tree.children)
     else:
@@ -484,8 +491,10 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
       summary = fwd_summary + rev_summary
       return SyntaxTree(summary, children)
 
-  def embed_subtree_outside(self, tree: 'SyntaxTree',
-                              left_sibs, right_sibs, parent_outside,
+  def embed_subtree_outside(self, tree: SyntaxTree,
+                              left_sibs: List[dy.Expression],
+                              right_sibs: List[dy.Expression],
+                              parent_outside: dy.Expression,
                               layer_idx=0):
     # Should combine (summary vectors of):
     # 1) Left siblings' inside representations
@@ -498,7 +507,7 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
     else:
       left_context = zeros
     if len(right_sibs) > 0:
-      right_sibs = expression_seqs.ExpressionSequence(right_sibs[::-1]) 
+      right_sibs = expression_seqs.ExpressionSequence(right_sibs[::-1])
       right_context = self.outside_right_layers[layer_idx].transduce(right_sibs)[-1]
     else:
       right_context = zeros
@@ -514,18 +523,19 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
       new_children.append(new_child)
     return SyntaxTree(summary, new_children)
 
-  def transform_labels(self, tree):
+  def transform_labels(self, tree: SyntaxTree):
     new_label = self.transform.transform(tree.label)
     children = [self.transform_labels(child) for child in tree.children]
     return SyntaxTree(new_label, children)
 
-  def embed_tree(self, tree: 'SyntaxTree'):
+  def embed_tree(self, tree: SyntaxTree):
+    # TODO: Better computation of root outside
     root_outside = dy.zeros(self.hidden_dim)
     for i in range(self.layers):
       if i == 0 and self.input_dim != self.hidden_dim:
         tree = self.transform_labels(tree)
       inside_tree = self.embed_subtree_inside(tree, i)
-      outside_tree = self.embed_subtree_outside(tree, [], [], root_outside, i)
+      outside_tree = self.embed_subtree_outside(inside_tree, [], [], root_outside, i)
       tree = self.zip_trees([inside_tree, outside_tree, tree])
     return tree
 
@@ -543,18 +553,11 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
     label = dy.esum([tree.label for tree in trees])
     return SyntaxTree(label, children)
 
-  def linearize(self, tree: 'SyntaxTree'):
-    """Converts a SyntaxTree of vectors into a linear sequence of vectors"""
-    r = [tree.label]
-    for child in tree.children:
-      r += self.linearize(child)
-    return r
-
-  def transduce(self, trees: 'SyntaxTree') -> 'expression_seqs.ExpressionSequence':
+  def transduce(self, trees: SyntaxTree) -> 'expression_seqs.ExpressionSequence':
     if type(trees) != list:
       tree = self.embed_tree(trees)
       self.root_emb = tree.label
-      return self.linearize(tree)
+      return linearize(tree)
     else:
       assert len(trees) == 1
       output = [self.transduce(t) for t in trees]
@@ -569,3 +572,96 @@ class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
             {".hidden_dim", ".root_main_transform.output_dim"},
             {".hidden_dim", ".root_cell_transform.input_dim"},
             {".hidden_dim", ".root_cell_transform.output_dim"}]
+
+class BinarySyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
+  yaml_tag = '!BinarySyntaxTreeEncoder'
+  @register_xnmt_handler
+  @serializable_init
+  def __init__(self,
+               layers=1,
+               input_dim=Ref("exp_global.default_layer_dim"),
+               hidden_dim=Ref("exp_global.default_layer_dim"),
+               dropout=Ref("exp_global.dropout", default=0.0),
+               emb_transform=bare(transforms.Linear, bias=False),
+               root_transform=bare(transforms.NonLinear),
+               attender=bare(attenders.MlpAttender),
+               mlp=None):
+    self.input_dim = input_dim
+    self.hidden_dim = hidden_dim
+    self.dropout_rate = dropout
+    self.emb_transform = emb_transform
+    self.root_transform = root_transform
+    self.attender = attender
+    self.mlp = self.add_serializable_component('mlp', mlp, lambda: transforms.MLP(input_dim=2*hidden_dim,
+                                               hidden_dim=hidden_dim, output_dim=hidden_dim))
+  @handle_xnmt_event
+  def on_start_sent(self, src):
+    pass
+
+  def get_final_states(self) -> List[transducers.FinalTransducerState]:
+    # TODO: Real final states
+    z = dy.zeros(self.hidden_dim)
+    return [transducers.FinalTransducerState(z, z)]
+
+  def transform_labels(self, tree: SyntaxTree):
+    new_label = self.emb_transform.transform(tree.label)
+    children = [self.transform_labels(child) for child in tree.children]
+    return SyntaxTree(new_label, children)
+
+  def embed_subtree_inside(self, tree: SyntaxTree):
+    if len(tree.children) == 0:
+      return SyntaxTree(tree.label, tree.children)
+    elif len(tree.children) == 1:
+      child = self.embed_subtree_inside(tree.children[0])
+      new_label = tree.label + child.label
+      return SyntaxTree(new_label, [child])
+    elif len(tree.children) == 2:
+      children = [self.embed_subtree_inside(child) for child in tree.children]
+      child_seq = expression_seqs.ExpressionSequence([child.label for child in children])
+      self.attender.init_sent(child_seq)
+      new_label = tree.label + self.attender.calc_context(tree.label)
+      new_label = dy.reshape(new_label, (self.hidden_dim,))
+      return SyntaxTree(new_label, children)
+    else:
+      assert False, 'Invalid arity for BinarySyntaxTreeEncoder %d' % len(tree.children)
+
+  def embed_subtree_outside(self, tree: SyntaxTree, parent_outside):
+    outside = self.mlp.transform(dy.concatenate([parent_outside, tree.label]))
+    # TODO should we add outside here, or just leave the root node's
+    # embedding as just its inside embedding?
+    new_label = tree.label + outside
+    children = [self.embed_subtree_outside(child, outside) for child in tree.children]
+    return SyntaxTree(new_label, children)
+
+  def embed_tree_outside(self, tree: SyntaxTree):
+    root_outside = self.root_transform.transform(tree.label)
+    new_label = tree.label + root_outside
+    children = [self.embed_subtree_outside(child, root_outside) for child in tree.children]
+    return SyntaxTree(new_label, children)
+
+  def embed_tree(self, tree: SyntaxTree):
+    tree = self.transform_labels(tree)
+    inside_tree = self.embed_subtree_inside(tree)
+    outside_tree = self.embed_tree_outside(inside_tree)
+    return outside_tree
+
+  def transduce(self, trees: SyntaxTree) -> expression_seqs.ExpressionSequence:
+    if type(trees) != list:
+      tree = self.embed_tree(trees)
+      return linearize(tree)
+    else:
+      assert len(trees) == 1
+      output = [self.transduce(t) for t in trees]
+      assert len(output) == 1
+      output = output[0] # XXX
+      return expression_seqs.ExpressionSequence(output)
+    pass
+
+  def shared_params(self):
+    return [{".hidden_dim", ".root_transform.input_dim"},
+            {".hidden_dim", ".root_transform.output_dim"},
+            {".input_dim", ".emb_transform.input_dim"},
+            {".hidden_dim", ".emb_transform.output_dim"},
+            {".hidden_dim", ".attender.input_dim"},
+            {".hidden_dim", ".attender.state_dim"},
+            {".hidden_dim", ".attender.hidden_dim"}]
