@@ -761,3 +761,116 @@ class TreeLSTM(transducers.SeqTransducer, Serializable):
 
   def shared_params(self):
     return []
+
+class TreeGRU(transducers.SeqTransducer, Serializable):
+  yaml_tag = '!TreeGRU'
+
+  @register_xnmt_handler
+  @serializable_init
+  def __init__(self,
+               input_dim=Ref("exp_global.default_layer_dim"),
+               hidden_dim=Ref("exp_global.default_layer_dim"),
+               param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
+               bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
+
+    self.input_dim = input_dim
+    self.hidden_dim = hidden_dim
+
+    model = param_collections.ParamManager.my_params(self)
+    W_dim = (self.hidden_dim, self.input_dim)
+    U_dim = (self.hidden_dim, self.hidden_dim)
+    b_dim = (self.hidden_dim,)
+
+    self.Wi = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
+    self.Wf0 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
+    self.Wf1 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
+    self.Wr0 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
+    self.Wr1 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
+    self.Wu = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
+
+    self.Ui0 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Ui1 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Uf00 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Uf01 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Uf10 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Uf11 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Ur00 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Ur01 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Ur10 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Ur11 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Uu0 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    self.Uu1 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
+    
+    self.bi = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
+    self.bf0 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
+    self.bf1 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
+    self.br0 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
+    self.br1 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
+    self.bu = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
+
+  @handle_xnmt_event
+  def on_start_sent(self, src):
+    pass
+
+  def get_final_states(self) -> List[transducers.FinalTransducerState]:
+    # TODO: Real final states
+    z = dy.zeros(self.hidden_dim)
+    return [transducers.FinalTransducerState(z, z)]
+
+  def compute_gate(self, key, x, children, activation=dy.logistic):
+    W = getattr(self, 'W%s' % key)
+    b = getattr(self, 'b%s' % key)
+    r = W * x + b
+
+    for i, child in enumerate(children):
+      U = getattr(self, 'U%s%d' % (key, i))
+      r += U * child.h
+
+    return activation(r)
+
+  def compute_u(self, x, children, r):
+    key = 'u'
+    W = getattr(self, 'W%s' % key)
+    b = getattr(self, 'b%s' % key)
+    r = W * x + b
+
+    for i, (child, ri) in enumerate(zip(children, r)):
+      U = getattr(self, 'U%s%d' % (key, i))
+      r += U * dy.cmult(child.h, ri)
+    return dy.tanh(r)
+
+  def compute_h(self, u, children, i, f):
+    r = dy.cmult(u, i)
+    for j, (child, fj) in enumerate(zip(children, f)):
+      r += dy.cmult(child.h, fj)
+    return r
+
+  def embed_tree(self, tree: SyntaxTree):
+    assert len(tree.children) <= 2
+    children = [self.embed_tree(child) for child in tree.children]
+
+    i = self.compute_gate('i', tree.label, children)
+    f = [self.compute_gate('f%d' % j, tree.label, children) for j in range(len(children))]
+    r = [self.compute_gate('r%d' % j, tree.label, children) for j in range(len(children))]
+    u = self.compute_u(tree.label, children, r)
+    h = self.compute_h(u, children, i, f)
+
+    new_tree = SyntaxTree(h, children)
+    new_tree.h = h
+    return new_tree
+
+  def transduce(self, trees: SyntaxTree) -> expression_seqs.ExpressionSequence:
+    if type(trees) != list:
+      tree = self.embed_tree(trees)
+      return linearize(tree)
+    else:
+      assert len(trees) == 1
+      output = [self.transduce(t) for t in trees]
+      assert len(output) == 1
+      output = output[0] # XXX
+      return expression_seqs.ExpressionSequence(output)
+    pass
+
+  def shared_params(self):
+    return []
+
