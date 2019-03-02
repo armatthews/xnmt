@@ -300,6 +300,12 @@ class SyntaxTree(Sentence):
     else:
       return sum(child.sent_len() for child in self.children)
 
+  def get_terminals(self):
+    if len(self.children) == 0:
+      return [self.label]
+    else:
+      return sum((child.get_terminals() for child in self.children), [])
+
   @staticmethod
   def from_string(line, nt_vocab, term_vocab, idx=None, depth=0):
     line = line.strip()

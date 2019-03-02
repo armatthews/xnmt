@@ -10,6 +10,7 @@ from xnmt import logger
 from xnmt import batchers, events, expression_seqs, input_readers, param_collections, param_initializers, sent, vocabs
 from xnmt.modelparts import transforms
 from xnmt.persistence import serializable_init, Serializable, Ref, Path, bare
+from xnmt.sent import SyntaxTree
 from xnmt.vocabs import RnngVocab
 
 class Embedder(object):
@@ -453,11 +454,6 @@ class PositionEmbedder(Embedder, Serializable):
     embeddings = dy.strided_select(dy.parameter(self.embeddings), [1,1], [0,0], [self.emb_dim, sent_len])
     return expression_seqs.ExpressionSequence(expr_tensor=embeddings, mask=None)
 
-class EmbeddedSyntaxTree:
-  def __init__(self, label, children):
-    self.label = label
-    self.children = children
-
 class SyntaxTreeEmbedder(Embedder, Serializable):
 
   yaml_tag = '!SyntaxTreeEmbedder'
@@ -524,14 +520,14 @@ class SyntaxTreeEmbedder(Embedder, Serializable):
   def on_start_sent(self, src):
     self.word_id_mask = None
 
-  def embed_single_sent(self, tree) -> EmbeddedSyntaxTree:
+  def embed_single_sent(self, tree) -> SyntaxTree:
     children = [self.embed_single_sent(child) for child in tree.children]
     embs = self.nt_embeddings if len(children) > 0 else self.term_embeddings
     label = embs[tree.label]
-    emb_tree = EmbeddedSyntaxTree(label, children)
+    emb_tree = SyntaxTree(label, children)
     return emb_tree
 
-  def embed_sent(self, tree) -> EmbeddedSyntaxTree:
+  def embed_sent(self, tree) -> SyntaxTree:
     batched = batchers.is_batched(tree)
     if not batched:
       return self.embed_single_sent(tree)
