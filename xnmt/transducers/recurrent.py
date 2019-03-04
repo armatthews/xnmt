@@ -746,27 +746,36 @@ class TreeRNN(transducers.SeqTransducer):
     z = dy.zeros(self.hidden_dim)
     return [transducers.FinalTransducerState(z, z)]
 
-  def compute_gate(self, key, x, children, activation=dy.logistic):
-    W = getattr(self, 'W%s' % key)
-    b = getattr(self, 'b%s' % key)
+  def compute_gate(self, key, layer_idx, x, children, activation=dy.logistic):
+    W = getattr(self, 'W%s' % key)[layer_idx]
+    b = getattr(self, 'b%s' % key)[layer_idx]
     r = W * x + b
 
     for i, child in enumerate(children):
-      U = getattr(self, 'U%s%d' % (key, i))
+      U = getattr(self, 'U%s%d' % (key, i))[layer_idx]
       r += U * child.h
 
     return activation(r)
 
   def transduce(self, trees: SyntaxTree) -> expression_seqs.ExpressionSequence:
     if type(trees) != list:
-      tree = self.embed_tree(trees)
-      return linearize(tree)
+      for layer_idx in range(self.layers):
+        trees = self.embed_tree(trees, layer_idx)
+      return linearize(trees)
     else:
       assert len(trees) == 1
       output = [self.transduce(t) for t in trees]
       assert len(output) == 1
       output = output[0] # XXX
       return expression_seqs.ExpressionSequence(output)
+
+  def create_parameter(self, model, name, dim, init):
+    if not hasattr(self, name):
+      setattr(self, name, [])
+    param_list = getattr(self, name)
+    assert type(param_list) == list
+    param = model.add_parameters(dim, init=init.initializer(dim))
+    param_list.append(param)
 
   def shared_params(self):
     return []
@@ -777,58 +786,43 @@ class TreeLSTM(TreeRNN, Serializable):
   @register_xnmt_handler
   @serializable_init
   def __init__(self,
+               layers: numbers.Integral = 1,
                input_dim=Ref("exp_global.default_layer_dim"),
                hidden_dim=Ref("exp_global.default_layer_dim"),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
-    #super(input_dim, hidden_dim, param_init, bias_init)
+    self.layers = layers
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
-    self.create_parameters(param_init, bias_init)
+    self.create_parameters(layers, param_init, bias_init)
 
-  def create_parameters(self, param_init, bias_init):
+  def create_parameters(self, layers, param_init, bias_init):
     model = param_collections.ParamManager.my_params(self)
-    W_dim = (self.hidden_dim, self.input_dim)
-    U_dim = (self.hidden_dim, self.hidden_dim)
-    b_dim = (self.hidden_dim,)
+    for layer_idx in range(layers):
+      W_dim = (self.hidden_dim, self.input_dim) if layer_idx == 0 else (self.hidden_dim, self.hidden_dim)
+      U_dim = (self.hidden_dim, self.hidden_dim)
+      b_dim = (self.hidden_dim,)
 
-    self.Wi = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wf0 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wf1 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wo = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wu = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
+      for gate in ['i', 'f0', 'f1', 'o', 'u']:
+        self.create_parameter(model, 'W' + gate, W_dim, param_init)
+        self.create_parameter(model, 'b' + gate, b_dim, bias_init)
+        for child_idx in ['0', '1']:
+          self.create_parameter(model, 'U' + gate + child_idx, U_dim, param_init)
 
-    self.Ui0 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Ui1 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uf00 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uf01 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uf10 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uf11 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uo0 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uo1 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uu0 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uu1 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    
-    self.bi = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.bf0 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.bf1 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.bo = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.bu = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-
-  def embed_tree(self, tree: SyntaxTree):
+  def embed_tree(self, tree: SyntaxTree, layer_idx):
     assert len(tree.children) <= 2
-    children = [self.embed_tree(child) for child in tree.children]
-    h, c = self.compute_output(tree.label, children)
+    children = [self.embed_tree(child, layer_idx) for child in tree.children]
+    h, c = self.compute_output(layer_idx, tree.label, children)
     new_tree = SyntaxTree(h, children)
     new_tree.h = h
     new_tree.c = c
     return new_tree
 
-  def compute_output(self, label, children):
-    i = self.compute_gate('i', label, children)
-    f = [self.compute_gate('f%d' % j, label, children) for j in range(len(children))]
-    o = self.compute_gate('o', label, children)
-    u = self.compute_gate('u', label, children, activation=dy.tanh)
+  def compute_output(self, layer_idx, label, children):
+    i = self.compute_gate('i', layer_idx,  label, children)
+    f = [self.compute_gate('f%d' % j, layer_idx, label, children) for j in range(len(children))]
+    o = self.compute_gate('o', layer_idx, label, children)
+    u = self.compute_gate('u', layer_idx, label, children, activation=dy.tanh)
     c = dy.cmult(i, u)
     for j, child in enumerate(children):
       c += dy.cmult(f[j], child.c)
@@ -841,56 +835,38 @@ class TreeGRU(TreeRNN, Serializable):
   @register_xnmt_handler
   @serializable_init
   def __init__(self,
+               layers: numbers.Integral = 1,
                input_dim=Ref("exp_global.default_layer_dim"),
                hidden_dim=Ref("exp_global.default_layer_dim"),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
-    #super().__init__(input_dim, hidden_dim, param_init, bias_init)
+    self.layers = layers
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
-    self.create_parameters(param_init, bias_init)
+    self.create_parameters(layers, param_init, bias_init)
 
-  def create_parameters(self, param_init, bias_init):
+  def create_parameters(self, layers, param_init, bias_init):
     model = param_collections.ParamManager.my_params(self)
-    W_dim = (self.hidden_dim, self.input_dim)
-    U_dim = (self.hidden_dim, self.hidden_dim)
-    b_dim = (self.hidden_dim,)
+    for layer_idx in range(layers):
+      W_dim = (self.hidden_dim, self.input_dim) if layer_idx == 0 else (self.hidden_dim, self.hidden_dim)
+      U_dim = (self.hidden_dim, self.hidden_dim)
+      b_dim = (self.hidden_dim,)
 
-    self.Wi = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wf0 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wf1 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wr0 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wr1 = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
-    self.Wu = model.add_parameters(W_dim, init=param_init.initializer(W_dim))
+      for gate in ['i', 'f0', 'f1', 'r0', 'r1', 'u']:
+        self.create_parameter(model, 'W' + gate, W_dim, param_init)
+        self.create_parameter(model, 'b' + gate, b_dim, bias_init)
+        for child_idx in ['0', '1']:
+          self.create_parameter(model,  'U' + gate + child_idx, U_dim, param_init)
 
-    self.Ui0 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Ui1 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uf00 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uf01 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uf10 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uf11 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Ur00 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Ur01 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Ur10 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Ur11 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uu0 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    self.Uu1 = model.add_parameters(U_dim, init=param_init.initializer(U_dim))
-    
-    self.bi = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.bf0 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.bf1 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.br0 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.br1 = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
-    self.bu = model.add_parameters(b_dim, init=bias_init.initializer(b_dim))
 
-  def compute_u(self, x, children, r):
+  def compute_u(self, layer_idx, x, children, r):
     key = 'u'
-    W = getattr(self, 'W%s' % key)
-    b = getattr(self, 'b%s' % key)
+    W = getattr(self, 'W%s' % key)[layer_idx]
+    b = getattr(self, 'b%s' % key)[layer_idx]
     r = W * x + b
 
     for i, (child, ri) in enumerate(zip(children, r)):
-      U = getattr(self, 'U%s%d' % (key, i))
+      U = getattr(self, 'U%s%d' % (key, i))[layer_idx]
       r += U * dy.cmult(child.h, ri)
     return dy.tanh(r)
 
@@ -900,18 +876,18 @@ class TreeGRU(TreeRNN, Serializable):
       r += dy.cmult(child.h, fj)
     return r
 
-  def compute_output(self, label, children):
-    i = self.compute_gate('i', label, children)
-    f = [self.compute_gate('f%d' % j, label, children) for j in range(len(children))]
-    r = [self.compute_gate('r%d' % j, label, children) for j in range(len(children))]
-    u = self.compute_u(label, children, r)
+  def compute_output(self, layer_idx, label, children):
+    i = self.compute_gate('i', layer_idx, label, children)
+    f = [self.compute_gate('f%d' % j, layer_idx, label, children) for j in range(len(children))]
+    r = [self.compute_gate('r%d' % j, layer_idx, label, children) for j in range(len(children))]
+    u = self.compute_u(layer_idx, label, children, r)
     h = self.compute_h(u, children, i, f)
     return h
 
-  def embed_tree(self, tree: SyntaxTree):
+  def embed_tree(self, tree: SyntaxTree, layer_idx):
     assert len(tree.children) <= 2
-    children = [self.embed_tree(child) for child in tree.children]
-    h = self.compute_output(tree.label, children)
+    children = [self.embed_tree(child, layer_idx) for child in tree.children]
+    h = self.compute_output(layer_idx, tree.label, children)
     new_tree = SyntaxTree(h, children)
     new_tree.h = h
     return new_tree
@@ -922,6 +898,7 @@ class BidirTreeGRU(TreeGRU, Serializable):
   @register_xnmt_handler
   @serializable_init
   def __init__(self,
+               layers: numbers.Integral = 1,
                input_dim=Ref("exp_global.default_layer_dim"),
                hidden_dim=Ref("exp_global.default_layer_dim"),
                term_encoder=bare(BiLSTMSeqTransducer),
@@ -929,33 +906,33 @@ class BidirTreeGRU(TreeGRU, Serializable):
                rev_gru=bare(UniGRUSeqTransducer),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
-    #super().__init__(input_dim, hidden_dim, param_init, bias_init)
+    self.layers = layers
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
-    self.create_parameters(param_init, bias_init)
+    self.create_parameters(layers, param_init, bias_init)
     self.root_transform = root_transform
     self.rev_gru = rev_gru
 
-  def embed_tree_inside(self, tree: SyntaxTree):
+  def embed_tree_inside(self, tree: SyntaxTree, layer_idx):
     assert len(tree.children) <= 2
-    children = [self.embed_tree_inside(child) for child in tree.children]
+    children = [self.embed_tree_inside(child, layer_idx) for child in tree.children]
 
-    i = self.compute_gate('i', tree.label, children)
-    f = [self.compute_gate('f%d' % j, tree.label, children) for j in range(len(children))]
-    r = [self.compute_gate('r%d' % j, tree.label, children) for j in range(len(children))]
-    u = self.compute_u(tree.label, children, r)
+    i = self.compute_gate('i', layer_idx, tree.label, children)
+    f = [self.compute_gate('f%d' % j, layer_idx, tree.label, children) for j in range(len(children))]
+    r = [self.compute_gate('r%d' % j, layer_idx, tree.label, children) for j in range(len(children))]
+    u = self.compute_u(layer_idx, tree.label, children, r)
     h = self.compute_h(u, children, i, f)
 
     new_tree = SyntaxTree(h, children)
     new_tree.h = h
     return new_tree
 
-  def embed_tree_outside(self, tree: SyntaxTree, parent: dy.Expression):
+  def embed_tree_outside(self, tree: SyntaxTree, layer_idx, parent: dy.Expression):
     if parent == None:
       h = self.root_transform.transform(tree.h)
     else:
       h = self.rev_gru.add_input_to_prev(parent, tree.h)
-    children = [self.embed_tree_outside(child, h) for child in tree.children]
+    children = [self.embed_tree_outside(child, layer_idx, h) for child in tree.children]
 
     new_tree = SyntaxTree(h, children)
     new_tree.h = h
@@ -985,14 +962,15 @@ class BidirTreeGRU(TreeGRU, Serializable):
     assert len(r) == 0
     return tree
 
-  def embed_tree(self, tree: SyntaxTree):
-    encoded = self.encode_tree(tree)
-    inside = self.embed_tree_inside(encoded)
-    outside = self.embed_tree_outside(inside, None)
+  def embed_tree(self, tree: SyntaxTree, layer_idx):
+    encoded = self.encode_tree(tree) if layer_idx == 0 else tree
+    inside = self.embed_tree_inside(encoded, layer_idx)
+    outside = self.embed_tree_outside(inside, layer_idx, None)
     r = zip_trees([inside, outside])
     self.update_h(r)
     return r
 
   def shared_params(self):
     return [{".term_encoder.input_dim", ".input_dim"},
-            {".term_encoder.hidden_dim", ".input_dim"}]
+            {".term_encoder.hidden_dim", ".input_dim"},
+            {".term_encoder.layers", ".layers"}]
