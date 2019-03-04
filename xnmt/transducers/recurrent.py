@@ -722,8 +722,9 @@ class BinarySyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
             {".hidden_dim", ".attender.state_dim"},
             {".hidden_dim", ".attender.hidden_dim"}]
 
-class TreeRNN(transducers.SeqTransducer, Serializable):
-  yaml_tag='!TreeRNN'
+class TreeRNN(transducers.SeqTransducer):
+  """yaml_tag='!TreeRNN'
+
   @register_xnmt_handler
   @serializable_init
   def __init__(self,
@@ -734,7 +735,7 @@ class TreeRNN(transducers.SeqTransducer, Serializable):
 
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
-    self.create_parameters()
+    self.create_parameters(param_init, bias_init)"""
 
   @handle_xnmt_event
   def on_start_sent(self, src):
@@ -770,7 +771,7 @@ class TreeRNN(transducers.SeqTransducer, Serializable):
   def shared_params(self):
     return []
 
-class TreeLSTM(TreeRNN):
+class TreeLSTM(TreeRNN, Serializable):
   yaml_tag = '!TreeLSTM'
 
   @register_xnmt_handler
@@ -780,9 +781,12 @@ class TreeLSTM(TreeRNN):
                hidden_dim=Ref("exp_global.default_layer_dim"),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
-    super(input_dim, hidden_dim, param_init, bias_init)
+    #super(input_dim, hidden_dim, param_init, bias_init)
+    self.input_dim = input_dim
+    self.hidden_dim = hidden_dim
+    self.create_parameters(param_init, bias_init)
 
-  def create_parameters(self):
+  def create_parameters(self, param_init, bias_init):
     model = param_collections.ParamManager.my_params(self)
     W_dim = (self.hidden_dim, self.input_dim)
     U_dim = (self.hidden_dim, self.hidden_dim)
@@ -831,7 +835,7 @@ class TreeLSTM(TreeRNN):
     h = dy.cmult(o, dy.tanh(c))
     return h, c
 
-class TreeGRU(transducers.SeqTransducer, Serializable):
+class TreeGRU(TreeRNN, Serializable):
   yaml_tag = '!TreeGRU'
 
   @register_xnmt_handler
@@ -841,9 +845,12 @@ class TreeGRU(transducers.SeqTransducer, Serializable):
                hidden_dim=Ref("exp_global.default_layer_dim"),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
-    super(input_dim, hidden_dim, param_init, bias_init)
+    #super().__init__(input_dim, hidden_dim, param_init, bias_init)
+    self.input_dim = input_dim
+    self.hidden_dim = hidden_dim
+    self.create_parameters(param_init, bias_init)
 
-  def create_parameters(self):
+  def create_parameters(self, param_init, bias_init):
     model = param_collections.ParamManager.my_params(self)
     W_dim = (self.hidden_dim, self.input_dim)
     U_dim = (self.hidden_dim, self.hidden_dim)
@@ -909,7 +916,7 @@ class TreeGRU(transducers.SeqTransducer, Serializable):
     new_tree.h = h
     return new_tree
 
-class BidirTreeGRU(TreeGRU):
+class BidirTreeGRU(TreeGRU, Serializable):
   yaml_tag = '!BidirTreeGRU'
 
   @register_xnmt_handler
@@ -922,7 +929,10 @@ class BidirTreeGRU(TreeGRU):
                rev_gru=bare(UniGRUSeqTransducer),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
-    super(input_dim, hidden_dim, param_init, bias_init)
+    #super().__init__(input_dim, hidden_dim, param_init, bias_init)
+    self.input_dim = input_dim
+    self.hidden_dim = hidden_dim
+    self.create_parameters(param_init, bias_init)
     self.root_transform = root_transform
     self.rev_gru = rev_gru
 
