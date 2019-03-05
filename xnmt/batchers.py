@@ -11,7 +11,7 @@ import dynet as dy
 
 from xnmt.persistence import serializable_init, Serializable
 from xnmt import expression_seqs
-from xnmt.transducers import recurrent
+#from xnmt.transducers import recurrent
 from xnmt import sent
 
 class Batch(ABC):
@@ -700,8 +700,9 @@ class WordTrgSrcBatcher(WordSortBatcher, Serializable):
       self.batch_size = (sum([s.sent_len() for s in src]) + sum([s.sent_len() for s in trg])) / len(src) * self.avg_batch_size
     return super()._pack_by_order(src, trg, order)
 
-def truncate_batches(*xl: Union[dy.Expression, Batch, Mask, recurrent.UniLSTMState]) \
-        -> Sequence[Union[dy.Expression, Batch, Mask, recurrent.UniLSTMState]]:
+def truncate_batches(*xl):
+#def truncate_batches(*xl: Union[dy.Expression, Batch, Mask, recurrent.UniLSTMState]) \
+#        -> Sequence[Union[dy.Expression, Batch, Mask, recurrent.UniLSTMState]]:
   """
   Truncate a list of batched items so that all items have the batch size of the input with the smallest batch size.
 
@@ -716,7 +717,7 @@ def truncate_batches(*xl: Union[dy.Expression, Batch, Mask, recurrent.UniLSTMSta
   Returns:
     Copies of the inputs, truncated to consistent batch size.
   """
-  batch_sizes = []
+  """batch_sizes = []
   for x in xl:
     if isinstance(x, dy.Expression) or isinstance(x, expression_seqs.ExpressionSequence):
       batch_sizes.append(x.dim()[1])
@@ -744,4 +745,5 @@ def truncate_batches(*xl: Union[dy.Expression, Batch, Mask, recurrent.UniLSTMSta
         raise ValueError(f"unsupported type {type(x)}")
     else:
       ret.append(x)
-  return ret
+  return ret"""
+  pass

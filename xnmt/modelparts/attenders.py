@@ -47,7 +47,7 @@ class Attender(object):
     I = self.curr_sent.as_tensor()
     return I * attention
 
-  def update(self, dec_state: decoders.DecoderState, att_state: AttenderState, attention: dy.Expression):
+  def update(self, dec_state, att_state: AttenderState, attention: dy.Expression):
     return None
 
 def safe_affine_transform(xs):
@@ -194,7 +194,7 @@ class CoverageAttender(Attender, Serializable):
     self.attention_vecs.append(normalized)
     return normalized
 
-  def update(self, dec_state: decoders.DecoderState, att_state: AttenderState, attention: dy.Expression):
+  def update(self, dec_state, att_state: AttenderState, attention: dy.Expression):
     dec_state_b = dy.concatenate_cols([dec_state for _ in range(self.I.dim()[0][1])])
     h_in = dy.concatenate([self.I, dy.transpose(attention), dec_state_b])
     h_out = self.coverage_updater.add_input_to_prev(att_state, h_in)[0]

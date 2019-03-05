@@ -6,7 +6,7 @@ import numpy as np
 
 from xnmt import batchers, event_trigger, losses, search_strategies, sent, vocabs
 from xnmt.persistence import bare, Ref, Serializable, serializable_init
-from xnmt.modelparts import transforms, decoders
+from xnmt.modelparts import transforms
 from xnmt.transducers.recurrent import UniLSTMState
 from xnmt.eval import metrics
 

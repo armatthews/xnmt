@@ -143,7 +143,7 @@ class BeamSearch(Serializable, SearchStrategy):
 
   def generate_output(self,
                       translator: 'xnmt.models.translators.AutoRegressiveTranslator',
-                      initial_dec_state: decoders.AutoRegressiveDecoderState,
+                      initial_dec_state: decoders.DecoderState,
                       initial_att_state: attenders.AttenderState,
                       src_length: Optional[numbers.Integral] = None) -> List[SearchOutput]:
     # TODO(philip30): can only do single decoding, not batched
@@ -169,9 +169,9 @@ class BeamSearch(Serializable, SearchStrategy):
           prev_dec_state = initial_dec_state
           prev_att_state = initial_att_state
 
-        current_output = translator.add_input(prev_word, prev_state)
+        current_output = translator.add_input(prev_word, prev_dec_state, prev_att_state)
         # We have a complete hypothesis
-        if current_output.state.is_complete():
+        if current_output.dec_state.is_complete():
           completed_hyp.append(hyp)
           continue
 

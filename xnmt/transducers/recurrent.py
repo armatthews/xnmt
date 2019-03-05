@@ -69,8 +69,8 @@ class UniLSTMState(object):
                         c=[ci[item] for ci in self._c],
                         h=[hi[item] for hi in self._h])
 
-class UniGRUSeqTransducer(transducers.SeqTransducer, Serializable):
-  yaml_tag = '!UniGRUSeqTransducer'
+class UniGRUSeqTransducer2(transducers.SeqTransducer, Serializable):
+  yaml_tag = '!UniGRUSeqTransducer2'
 
   @register_xnmt_handler
   @serializable_init
