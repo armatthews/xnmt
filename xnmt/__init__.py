@@ -44,6 +44,7 @@ import xnmt.reports
 import xnmt.rl
 import xnmt.specialized_encoders.segmenting_encoder
 import xnmt.specialized_encoders.self_attentional_am
+import xnmt.specialized_encoders.syntax
 import xnmt.specialized_encoders.tilburg_harwath
 import xnmt.train.regimens
 import xnmt.train.tasks
