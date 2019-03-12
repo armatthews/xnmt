@@ -413,7 +413,7 @@ class SyntaxTree(Sentence):
                           unpadded_sent=unpadded_sent)
 
 class RnngSentence(ReadableSentence):
-  def __init__(self, words, vocab, idx=None, score=None, output_procs=[]):
+  def __init__(self, words, vocab, idx=None, score=None, output_procs:Union[OutputProcessor, Sequence[OutputProcessor]] = []):
     super().__init__(idx, score, output_procs)
     self.words = words
     self.vocab = vocab
@@ -421,7 +421,7 @@ class RnngSentence(ReadableSentence):
   def __getitem__(self, key):
     ret = self.words[key]
     if isinstance(ret, list):  # support for slicing
-      return RnngSentence(words=ret, vocab=self.vocab, idx=self.idx, score=self.score)
+      return RnngSentence(words=ret, vocab=self.vocab, idx=self.idx, score=self.score, output_procs=self.output_procs)
     return ret 
 
   def sent_len(self):

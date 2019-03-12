@@ -605,13 +605,13 @@ class RnngReader(BaseTextReader, Serializable):
   yaml_tag = "!RnngReader"
 
   @serializable_init
-  def __init__(self, vocab):
+  def __init__(self, vocab, output_proc: Sequence[output.OutputProcessor] = []) -> None:
     self.vocab = vocab
-    self.output_procs = []
+    self.output_procs = output.OutputProcessor.get_output_processor(output_proc)
 
   def read_sent(self, line, idx):
     words = [self.vocab.convert(word) for word in line.strip().split()]
-    return sent.RnngSentence(words=words, vocab=self.vocab)
+    return sent.RnngSentence(words=words, vocab=self.vocab, output_procs=self.output_procs)
 
   def make_sent(self, **kwargs):
     return sent.RnngSentence(**kwargs)
