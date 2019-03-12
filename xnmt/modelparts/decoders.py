@@ -288,7 +288,7 @@ class RnngDecoder(Decoder, Serializable):
     self.comp_lstm_rev = comp_lstm_rev
 
 
-    # Transform the word embeddings from input_dim into hidden_dim
+    # Transform the word embeddings from embedder.emb_dim into hidden_dim
     self.word_emb_transform = word_emb_transform
 
     # Composed representation of a treelet is composed as follows:
@@ -490,9 +490,8 @@ class RnngDecoder(Decoder, Serializable):
     return r_actions, r_scores
 
   def shared_params(self):
-    return [{".input_dim", ".embedder.term_emb.emb_dim"},
-            {".input_dim", ".embedder.nt_emb.emb_dim"},
-            {".input_dim", ".word_emb_transform.input_dim"},
+    return [{".embedder.nt_emb.emb_dim", ".embedder.term_emb.emb_dim"},
+            {".embedder.nt_emb.emb_dim", ".word_emb_transform.input_dim"},
             {".hidden_dim", ".word_emb_transform.output_dim"},
             {".hidden_dim", ".action_scorer.input_dim"},
             {".hidden_dim", ".stack_lstm.input_dim"},
