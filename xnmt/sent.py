@@ -6,7 +6,7 @@ from typing import List, Optional, Sequence, Union
 
 import numpy as np
 
-from xnmt.vocabs import Vocab
+from xnmt.vocabs import Vocab, RnngAction, RnngVocab
 from xnmt.output import OutputProcessor
 
 class Sentence(object):
@@ -432,6 +432,10 @@ class RnngSentence(ReadableSentence):
 
   def len_unpadded(self):
     return len(self.words)
+
+  def create_padded_sent(self, pad_len: numbers.Integral):
+    words = self.words + [RnngAction(RnngVocab.NONE, None) for _ in range(pad_len)]
+    return RnngSentence(words, self.vocab, self.idx, self.score, self.output_procs)
 
 class SegmentedSentence(SimpleSentence):
   def __init__(self, segment=[], **kwargs) -> None:

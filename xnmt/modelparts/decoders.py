@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Union
 from collections import namedtuple
 import numbers
 import heapq
@@ -51,16 +51,24 @@ class AutoRegressiveDecoderState(DecoderState):
     complete: boolean representing whether this state represents a complete
               sentence
   """
-  def __init__(self, rnn_state=None, context=None, complete=False):
+  def __init__(self, rnn_state: recurrent.UniLSTMState = None, context: dy.Expression = None, complete: Union[bool, batchers.ListBatch] = False):
     self.rnn_state = rnn_state
     self.context = context
     self.complete = complete
+
+    batch_size = context.dim()[1]
+    if batch_size > 1:
+      if not batchers.is_batched(complete):
+        self.complete = batchers.ListBatch([complete for _ in range(batch_size)])
 
   def as_vector(self):
     return self.rnn_state.output()
 
   def is_complete(self):
-    return self.complete
+    if batchers.is_batched(self.complete):
+      return not (False in self.complete)
+    else:
+      return self.complete
 
 class AutoRegressiveDecoder(Decoder, Serializable):
   """
@@ -195,7 +203,7 @@ class RnngDecoderState(object):
     return '\n'.join(['stack: ' + str(self.stack), 'terms:' + str(self.terminals)])
 
   def is_forbidden(self, a : RnngAction):
-    if a.action not in [RnngVocab.SHIFT, RnngVocab.NT, RnngVocab.REDUCE]:
+    if a.action not in [RnngVocab.SHIFT, RnngVocab.NT, RnngVocab.REDUCE, RnngVocab.NONE]:
       return True
 
     if len(self.stack) >= RnngDecoderState.MaxOpenNTs:
@@ -203,7 +211,7 @@ class RnngDecoderState(object):
         return True
 
     if len(self.stack) == 0:
-      if a.action != RnngVocab.NT:
+      if a.action != RnngVocab.NT and a.action != RnngVocab.NONE:
         return True
 
     if a.action == RnngVocab.REDUCE:
@@ -211,6 +219,9 @@ class RnngDecoderState(object):
         return True
       if len(self.stack[-1].children) == 0:
         return True
+
+    if a.action == RnngVocab.NONE:
+      return not self.is_complete()
 
     return False
 
@@ -242,6 +253,14 @@ class RnngDecoderState(object):
     r.terminals = self.terminals[:]
     r.actions = self.actions[:]
     return r
+
+class RnngDecoderStateBatch(batchers.ListBatch):
+  def __init__(self, batch_elements):
+    super().__init__(batch_elements)
+
+  def as_vector(self):
+    return dy.concatenate_to_batch([elem.as_vector() for elem in self])
+
 
 class RnngDecoder(Decoder, Serializable):
   yaml_tag = "!RnngDecoder"
@@ -311,20 +330,44 @@ class RnngDecoder(Decoder, Serializable):
   def calc_loss(self, dec_state : RnngDecoderState, ref_action : RnngAction):
     assert dec_state.context != None
     assert type(ref_action) == batchers.ListBatch
-    assert len(ref_action) == 1
-    ref_action = ref_action[0]
+    batched = batchers.is_batched(ref_action)
+
+    if not batched:
+      assert len(ref_action) == 1
+      ref_action = ref_action[0]
 
     state = self.calc_state(dec_state)
 
-    action_loss = self.action_scorer.calc_loss(state, ref_action[0])
+    ref_action_type = ref_action[0] if not batched else batchers.ListBatch([r[0] for r in ref_action])
+    ref_action_subtype = ref_action[1] if not batched else batchers.ListBatch([r[1] for r in ref_action])
+
+    action_loss = self.action_scorer.calc_loss(state, ref_action_type)
     loss = action_loss
-    if ref_action[0] == RnngVocab.SHIFT:
-      term_loss = self.term_scorer.calc_loss(state, ref_action[1])
-      loss += term_loss
-    elif ref_action[0] == RnngVocab.NT:
-      nt_loss = self.nt_scorer.calc_loss(state, ref_action[1])
-      loss += nt_loss
+    if not batched:
+      loss += self.calc_subloss(state, ref_action_type, ref_action_subtype)
+    else:
+      batch_size = state.dim()[1]
+      sublosses = []
+      for i in range(batch_size):
+        state_i = dy.pick_batch_elem(state, i)
+        subloss = self.calc_subloss(state_i, ref_action_type[i], ref_action_subtype[i])
+        sublosses.append(subloss)
+      sublosses = dy.concatenate_to_batch(sublosses)
+      assert loss.dim() == sublosses.dim()
+      loss += sublosses
     return loss
+
+  def calc_subloss(self, state, ref_action_type, ref_action_subtype):
+    assert state.dim()[1] == 1
+    assert not batchers.is_batched(ref_action_type)
+    assert not batchers.is_batched(ref_action_subtype)
+    if ref_action_type == RnngVocab.SHIFT:
+      term_loss = self.term_scorer.calc_loss(state, ref_action_subtype)
+      return term_loss
+    elif ref_action_type == RnngVocab.NT:
+      nt_loss = self.nt_scorer.calc_loss(state, ref_action_subtype)
+      return nt_loss
+    return dy.zeros((1,))
 
   def calc_log_probs(self, dec_state : RnngDecoderState):
     raise NotImplementedError()
@@ -356,7 +399,7 @@ class RnngDecoder(Decoder, Serializable):
 
   def action_lstm_push(self,
                        action_lstm_state: recurrent.UniLSTMState,
-                       word_emb: dy.Expression):    
+                       word_emb: dy.Expression):
     assert self.use_action_lstm
     return self.lstm_push(self.action_lstm, action_lstm_state, word_emb)
 
@@ -427,14 +470,22 @@ class RnngDecoder(Decoder, Serializable):
     return new_state
 
   def add_input(self, dec_state : RnngDecoderState, word : RnngAction):
-    # TODO: Are these two lines needed at training time, but required to
-    # not be there for test time?
-    if batchers.is_batched(word):
-      assert len(word) == 1
-      word = word[0]
-    assert not dec_state.is_forbidden(word)
-    assert not dec_state.is_complete(), 'Attempt to add to a complete hypothesis!'
+    if dec_state.as_vector().dim()[1] > 1:
+      assert dec_state.as_vector().dim()[1] == dec_state.context.dim()[1]
+      assert word.batch_size() == dec_state.as_vector().dim()[1]
+      assert word.batch_size() == dec_state.context.dim()[1]
 
+    if batchers.is_batched(word):
+      new_states = []
+      for i in range(word.batch_size()):
+        ds = dec_state[i] if dec_state.as_vector().dim()[1] > 1 else dec_state
+        new_state = self.add_input(ds, word[i])
+        new_states.append(new_state)
+      new_states = RnngDecoderStateBatch(new_states)
+      return new_states
+
+    assert not dec_state.is_forbidden(word)
+    assert not dec_state.is_complete() or word.action == RnngVocab.NONE, 'Attempt to add to a complete hypothesis!'
     if word.action == RnngVocab.SHIFT:
       return self.perform_shift(dec_state, word.subaction)
     elif word.action == RnngVocab.NT:
