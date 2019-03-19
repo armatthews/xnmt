@@ -261,6 +261,18 @@ class RnngDecoderStateBatch(batchers.ListBatch):
   def as_vector(self):
     return dy.concatenate_to_batch([elem.as_vector() for elem in self])
 
+  def is_forbidden(self, word):
+    if not batchers.is_batched(word):
+      word = batchers.ListBatch([word] * self.batch_size())
+
+    assert self.batch_size() == word.batch_size()
+    r = []
+    for i in range(self.batch_size()):
+      r.append(self[i].is_forbidden(word[i]))
+    r = batchers.mark_as_batch(r)
+    assert self.batch_size() == r.batch_size()
+    return r
+
 
 class RnngDecoder(Decoder, Serializable):
   yaml_tag = "!RnngDecoder"
@@ -484,7 +496,18 @@ class RnngDecoder(Decoder, Serializable):
       new_states = RnngDecoderStateBatch(new_states)
       return new_states
 
-    assert not dec_state.is_forbidden(word)
+    if type(dec_state) == RnngDecoderStateBatch:
+      assert dec_state.batch_size() == 1
+      dec_state = dec_state[0]
+      assert type(dec_state) != RnngDecoderStateBatch
+
+    if dec_state.is_forbidden(word):
+      for s in dec_state:
+        print('stack: %d, terms: %d' % (len(s.stack), len(s.terminals)))
+      print('%s is forbidden in dec_state above.' % (self.vocab[word]))
+      print(dec_state.is_forbidden(word))
+
+    assert not dec_state.is_forbidden(word), '%s (type %s) is forbidden in dec_state %s (type %s)' % (str(word), str(type(word)), str(dec_state), str(type(dec_state)))
     assert not dec_state.is_complete() or word.action == RnngVocab.NONE, 'Attempt to add to a complete hypothesis!'
     if word.action == RnngVocab.SHIFT:
       return self.perform_shift(dec_state, word.subaction)
