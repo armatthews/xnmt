@@ -134,7 +134,8 @@ class AutoRegressiveDecoder(Decoder, Serializable):
     rnn_state = self.rnn.initial_state()
     rnn_s = self.bridge.decoder_init(enc_final_states)
     rnn_state = rnn_state.set_s(rnn_s)
-    zeros = dy.zeros(self.input_dim) if self.input_feeding else None
+    batch_size = rnn_s[0].dim()[1]
+    zeros = dy.zeros(self.input_dim, batch_size=batch_size) if self.input_feeding else None
     ss_expr = self.embedder.embed(ss)
     rnn_state = rnn_state.add_input(dy.concatenate([ss_expr, zeros]) if self.input_feeding else ss_expr)
     return AutoRegressiveDecoderState(rnn_state=rnn_state, context=zeros)
@@ -154,9 +155,11 @@ class AutoRegressiveDecoder(Decoder, Serializable):
     if self.input_feeding:
       inp = dy.concatenate([inp, mlp_dec_state.context])
     rnn_state = mlp_dec_state.rnn_state
-    if self.truncate_dec_batches: rnn_state, inp = batchers.truncate_batches(rnn_state, inp)
+    if self.truncate_dec_batches:
+      rnn_state, inp = batchers.truncate_batches(rnn_state, inp)
+    new_rnn_state = rnn_state.add_input(inp)
     new_state =  AutoRegressiveDecoderState(
-        rnn_state=rnn_state.add_input(inp),
+        rnn_state=new_rnn_state,
         context=mlp_dec_state.context,
         complete=(trg_word == Vocab.ES))
     return new_state

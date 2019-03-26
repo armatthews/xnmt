@@ -1,4 +1,4 @@
-import copy
+
 import functools
 import math
 import numbers
@@ -289,10 +289,14 @@ class SyntaxTree(Sentence):
   def __repr__(self):
     if len(self.children) == 0:
       return str(self.label)
-    return '(%d %s)' % (self.label, ' '.join(repr(child) for child in self.children))
+    return '(%s %s)' % (str(self.label), ' '.join(repr(child) for child in self.children))
 
   def __str__(self):
     return repr(self)
+
+  def batch_size(self):
+    import batchers
+    return self.label.batch_size() if batchers.is_batched(self.label) else 1
 
   def sent_len(self):
     if len(self.children) == 0:

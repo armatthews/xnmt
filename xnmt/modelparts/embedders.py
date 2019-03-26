@@ -521,10 +521,23 @@ class SyntaxTreeEmbedder(Embedder, Serializable):
     self.word_id_mask = None
 
   def embed_single_sent(self, tree) -> SyntaxTree:
-    children = [self.embed_single_sent(child) for child in tree.children]
-    embs = self.nt_embeddings if len(children) > 0 else self.term_embeddings
-    label = embs[tree.label]
-    emb_tree = SyntaxTree(label, children)
+    batched = batchers.is_batched(tree.label)
+    if not batched:
+      children = [self.embed_single_sent(child) for child in tree.children]
+      embs = self.nt_embeddings if len(children) > 0 else self.term_embeddings
+      label = embs[tree.label]
+      emb_tree = SyntaxTree(label, children)
+    else:
+      children = [self.embed_single_sent(child) for child in tree.children]
+      embs = []
+      for i in range(tree.label.batch_size()):
+        is_terminal = (False in [child.mask[i] for child in children])
+        emb_table = self.nt_embeddings if is_terminal else self.term_embeddings
+        emb = emb_table[tree.label[i]]
+        embs.append(emb)
+      label = dy.concatenate_to_batch(embs)
+      emb_tree = SyntaxTree(label, children)
+      emb_tree.mask = tree.mask
     return emb_tree
 
   def embed_sent(self, tree) -> SyntaxTree:

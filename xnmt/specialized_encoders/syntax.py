@@ -19,7 +19,7 @@ def linearize(tree: SyntaxTree):
   r = [tree.label]
   for child in tree.children:
     r += linearize(child)
-  return r
+  return expression_seqs.ExpressionSequence(r)
 
 def zip_trees(trees):
   """Takes a list of trees, all with the same structure,
@@ -311,11 +311,12 @@ class TreeRNN(transducers.SeqTransducer):
 
   @handle_xnmt_event
   def on_start_sent(self, src):
-    pass
+    from xnmt import batchers
+    self.batch_size = len(src.label) if batchers.is_batched(src.label) else 1
 
   def get_final_states(self) -> List[transducers.FinalTransducerState]:
     # TODO: Real final states
-    z = dy.zeros(self.hidden_dim)
+    z = dy.zeros(self.hidden_dim, batch_size=self.batch_size)
     return [transducers.FinalTransducerState(z, z)]
 
   def compute_gate(self, key, layer_idx, x, children, activation=dy.logistic):
@@ -329,7 +330,7 @@ class TreeRNN(transducers.SeqTransducer):
 
     return activation(r)
 
-  def transduce(self, trees: SyntaxTree) -> expression_seqs.ExpressionSequence:
+  def transduce(self, trees: Union[SyntaxTree, List[SyntaxTree]]) -> expression_seqs.ExpressionSequence:
     if type(trees) != list:
       for layer_idx in range(self.layers):
         trees = self.embed_tree(trees, layer_idx)

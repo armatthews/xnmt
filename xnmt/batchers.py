@@ -747,3 +747,54 @@ def truncate_batches(*xl):
       ret.append(x)
   return ret"""
   pass
+
+class BinarySyntaxTreeBatcher(WordSrcBatcher, Serializable):
+  yaml_tag = '!BinarySyntaxTreeBatcher'
+
+  @serializable_init
+  def __init__(self,
+               avg_batch_size: numbers.Integral = 1) -> None:
+    super().__init__(avg_batch_size=avg_batch_size, pad_src_to_multiple=1)
+
+  def create_single_batch(self, src_sents, trg_sents, sort_by_trg_len):
+    if trg_sents is not None and sort_by_trg_len:
+      src_sents, trg_sents = zip(*sorted(zip(src_sents, trg_sents), key=lambda x: x[1].sent_len(), reverse=True))
+    src_batch = self._make_src_batch(src_sents)
+
+    if trg_sents:
+      trg_batch = pad(trg_sents)
+      return src_batch, trg_batch
+    else:
+      return src_batch
+
+  def _make_src_batch(self, src_sents, pad_symbol=0):
+    pad_tree = sent.SyntaxTree(pad_symbol, [])
+    labels = [s.label for s in src_sents]
+    mask = np.array([s.label == pad_symbol for s in src_sents])
+    roots = mark_as_batch(labels, mask)
+
+    need_left = False
+    need_right = False
+    children = []
+
+    for s in src_sents:
+      assert len(s.children) <= 2
+      if len(s.children) >= 1:
+        need_left = True
+      if len(s.children) == 2:
+        need_right = True
+        break
+
+    if need_left:
+      left_children = [(s.children[0] if len(s.children) > 0 else pad_tree) for s in src_sents]
+      left_child = self._make_src_batch(left_children, pad_symbol)
+      children.append(left_child)
+
+    if need_right:
+      right_children = [(s.children[1] if len(s.children) > 1 else pad_tree) for s in src_sents]
+      right_child = self._make_src_batch(right_children, pad_symbol)
+      children.append(right_child)
+
+    r = sent.SyntaxTree(roots, children)
+    r.mask = mask
+    return r
