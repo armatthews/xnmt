@@ -540,12 +540,17 @@ class SyntaxTreeEmbedder(Embedder, Serializable):
       emb_tree.mask = tree.mask
     return emb_tree
 
+  def embed_batch(self, batch):
+    leaves = dy.lookup_batch(self.term_embeddings, batch.leaves)
+    non_leaves = dy.lookup_batch(self.nt_embeddings, batch.non_leaves)
+    return batchers.SyntaxTreeBatch(batch.trees, leaves, non_leaves)
+
   def embed_sent(self, tree) -> SyntaxTree:
     batched = batchers.is_batched(tree)
-    if not batched:
-      return self.embed_single_sent(tree)
-    else:
-      return [self.embed_single_sent(t) for t in tree]
+    r = self.embed_batch(tree) if batched else self.embed_single_sent(tree)
+    r.SS = dy.lookup(self.term_embeddings, vocabs.Vocab.SS)
+    r.ES = dy.lookup(self.term_embeddings, vocabs.Vocab.ES)
+    return r
 
 class RnngEmbedder(Embedder, Serializable):
   yaml_tag = '!RnngEmbedder'

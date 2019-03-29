@@ -1,11 +1,12 @@
 import sys
 import numbers
+from collections import defaultdict
 from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import dynet as dy
 
-from xnmt import expression_seqs, param_collections, param_initializers
+from xnmt import expression_seqs, param_collections, param_initializers, batchers
 from xnmt.modelparts import transforms, attenders
 from xnmt.events import register_xnmt_handler, handle_xnmt_event
 from xnmt.transducers import base as transducers
@@ -312,7 +313,7 @@ class TreeRNN(transducers.SeqTransducer):
   @handle_xnmt_event
   def on_start_sent(self, src):
     from xnmt import batchers
-    self.batch_size = len(src.label) if batchers.is_batched(src.label) else 1
+    self.batch_size = src.batch_size() if batchers.is_batched(src) else 1
 
   def get_final_states(self) -> List[transducers.FinalTransducerState]:
     # TODO: Real final states
@@ -544,6 +545,350 @@ class BidirTreeGRU(TreeGRU, Serializable):
     r = zip_trees([inside, outside])
     self.update_h(r)
     return r
+
+  def shared_params(self):
+    return [{".term_encoder.input_dim", ".input_dim"},
+            {".term_encoder.hidden_dim", ".input_dim"},
+            {".term_encoder.layers", ".layers"}]
+
+class BatchedBidirTreeGRU(TreeGRU, Serializable):
+  yaml_tag = '!BatchedBidirTreeGRU'
+
+  # TODO: root_transform and rev_gru should be lists of stuff, one per layer
+  @register_xnmt_handler
+  @serializable_init
+  def __init__(self,
+               layers: numbers.Integral = 1,
+               input_dim=Ref("exp_global.default_layer_dim"),
+               hidden_dim=Ref("exp_global.default_layer_dim"),
+               term_encoder=bare(recurrent.BiLSTMSeqTransducer),
+               root_transform=bare(transforms.NonLinear),
+               rev_gru=bare(recurrent.UniGRUSeqTransducer),
+               param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
+               bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
+    self.layers = layers
+    self.input_dim = input_dim
+    self.hidden_dim = hidden_dim
+    self.create_parameters(layers, param_init, bias_init)
+    self.root_transform = root_transform
+    self.rev_gru = rev_gru
+
+  def transduce(self, trees: batchers.SyntaxTreeBatch) -> expression_seqs.ExpressionSequence:
+    for layer_idx in range(self.layers):
+      trees = self.embed_tree(trees, layer_idx)
+    return linearize(trees)
+
+  def transform_single(self, tree: SyntaxTree, term_vecs, nt_vecs, term_idx, nt_idx, out_nodes, out_vectors):
+    tree.idx = term_idx + nt_idx
+    assert len(out_nodes) == tree.idx
+    assert len(out_vectors) == tree.idx
+    out_nodes.append(tree)
+    if len(tree.children) == 0:
+      assert term_idx < term_vecs.dim()[1]
+      out_vectors.append(dy.pick_batch_elem(term_vecs, term_idx))
+      term_idx += 1
+    else:
+      assert nt_idx < nt_vecs.dim()[1]
+      out_vectors.append(dy.pick_batch_elem(nt_vecs, nt_idx))
+      nt_idx += 1
+      for child in tree.children:
+        term_idx, nt_idx = self.transform_single(child, term_vecs, nt_vecs, term_idx, nt_idx, out_nodes, out_vectors)
+
+    assert len(out_nodes) == len(out_vectors)
+    return term_idx, nt_idx
+
+  def transform(self, batch: batchers.SyntaxTreeBatch):
+    nodes = []
+    vectors = []
+    for tree in batch.trees:
+      n = []
+      v = []
+      self.transform_single(tree, batch.leaves, batch.non_leaves, 0, 0, n, v)
+      nodes.append(n)
+      vectors.append(v)
+    return nodes, vectors
+
+  def dtl_sort_single(self, tree: SyntaxTree, term_vecs, nt_vecs, stuff, term_idx, nt_idx, node_vectors):
+    tree.idx = term_idx + nt_idx
+    assert len(node_vectors) == tree.idx
+    if len(tree.children) == 0:
+      assert term_idx < term_vecs.dim()[1]
+      node_vectors.append(dy.pick_batch_elem(term_vecs, term_idx))
+      term_idx += 1
+      tree.dtl = 0
+      arity = 0
+    else:
+      assert nt_idx < nt_vecs.dim()[1]
+      node_vectors.append(dy.pick_batch_elem(nt_vecs, nt_idx))
+      nt_idx += 1
+      for child in tree.children:
+        term_idx, nt_idx = self.dtl_sort_single(child, term_vecs, nt_vecs, stuff, term_idx, nt_idx, node_vectors)
+      tree.dtl = max([child.dtl for child in tree.children]) + 1
+      arity = len(tree.children)
+    print('At level %d nodes %s build into node %s' % (tree.dtl, str([child.idx for child in tree.children]), str(tree.idx)))
+    stuff[tree.dtl][arity].append((tree.idx, [child.idx for child in tree.children]))
+    return term_idx, nt_idx
+
+  def dtr_sort_single(self, tree: SyntaxTree, term_vecs, nt_vecs, stuff, term_idx, nt_idx, node_vectors, dtr=0, parent_idx=-1):
+    tree.idx = term_idx + nt_idx
+    assert len(node_vectors) == tree.idx
+    if len(tree.children) == 0:
+      assert term_idx < term_vecs.dim()[1]
+      node_vectors.append(dy.pick_batch_elem(term_vecs, term_idx))
+      term_idx += 1
+      tree.dtr = dtr
+      arity = 0
+    else:
+      assert nt_idx < nt_vecs.dim()[1]
+      node_vectors.append(dy.pick_batch_elem(nt_vecs, nt_idx))
+      nt_idx += 1
+      tree.dtr = dtr
+      arity = len(tree.children)
+      for child in tree.children:
+        term_idx, nt_idx = self.dtr_sort_single(child, term_vecs, nt_vecs, stuff, term_idx, nt_idx, node_vectors, dtr + 1, tree.idx)
+    print('Node %d dtr is %d, parent is %d' % (tree.idx, dtr, parent_idx))
+    stuff[dtr].append((tree.idx, parent_idx))
+    return term_idx, nt_idx
+
+  def dtl_sort(self, batch: batchers.SyntaxTreeBatch, stuff=defaultdict(lambda: defaultdict(list)), term_idx=0, nt_idx=0, node_vectors=[]):
+    print('Term vecs: ' + str(batch.leaves.dim()))
+    print('NT vecs: ' + str(batch.non_leaves.dim()))
+    for tree in batch.trees:
+      term_idx, nt_idx = self.dtl_sort_single(tree, batch.leaves, batch.non_leaves, stuff, term_idx, nt_idx, node_vectors)
+    return stuff, node_vectors
+
+  def dtr_sort(self, batch: batchers.SyntaxTreeBatch, stuff=defaultdict(list), term_idx=0, nt_idx=0, node_vectors=[]):
+    for tree in batch.trees:
+      term_idx, nt_idx = self.dtr_sort_single(tree, batch.leaves, batch.non_leaves, stuff, term_idx, nt_idx, node_vectors)
+    return stuff, node_vectors
+
+  def compute_gate(self, key, layer_idx, x, children, activation=dy.logistic):
+    W = getattr(self, 'W%s' % key)[layer_idx]
+    b = getattr(self, 'b%s' % key)[layer_idx]
+    r = W * x + b
+
+    for i, child in enumerate(children):
+      U = getattr(self, 'U%s%d' % (key, i))[layer_idx]
+      r += U * child
+
+    return activation(r)
+
+  def compute_u(self, layer_idx, x, children, r):
+    key = 'u'
+    W = getattr(self, 'W%s' % key)[layer_idx]
+    b = getattr(self, 'b%s' % key)[layer_idx]
+    r = W * x + b
+
+    for i, (child, ri) in enumerate(zip(children, r)):
+      U = getattr(self, 'U%s%d' % (key, i))[layer_idx]
+      r += U * dy.cmult(child, ri)
+    return dy.tanh(r)
+
+  def compute_h(self, u, children, i, f):
+    r = dy.cmult(u, i)
+    for j, (child, fj) in enumerate(zip(children, f)):
+      r += dy.cmult(child, fj)
+    return r
+
+  def untransform_single(self, tree, node_vectors, leaves, non_leaves, term_idx, nt_idx):
+    idx = term_idx + nt_idx
+    print('Untransforming node %d (%d/%d). Array lengths are %d, %d, and %d' % (idx, term_idx, nt_idx, len(node_vectors), len(leaves), len(non_leaves)))
+    assert idx < len(node_vectors)
+    assert term_idx == len(leaves)
+    assert nt_idx == len(non_leaves)
+    if len(tree.children) == 0:
+      leaves.append(node_vectors[term_idx])
+      term_idx += 1
+    else:
+      non_leaves.append(node_vectors[nt_idx])
+      nt_idx += 1
+      for child in tree.children:
+        term_idx, nt_idx = self.untransform_single(child, node_vectors, leaves, non_leaves, term_idx, nt_idx)
+    return term_idx, nt_idx
+
+  def untransform(self, trees, node_vectors, term_idx=0, nt_idx=0):
+    leaves = []
+    non_leaves = []
+    for tree in trees:
+      term_idx, nt_idx = self.untransform_single(tree, node_vectors, leaves, non_leaves, term_idx, nt_idx)
+    assert term_idx + nt_idx == len(node_vectors)
+    return dy.concatenate_to_batch(leaves), dy.concatenate_to_batch(non_leaves)
+
+  def embed_tree_inside(self, batch: batchers.SyntaxTreeBatch, layer_idx):
+    # Topologically sort the trees in the batch
+    stuff, node_vectors = self.dtl_sort(batch)
+
+    # For each level (0 = terminals), and arity
+    # create a lists of nodes that need computed.
+    for level in sorted(stuff.keys()):
+      for arity in sorted(stuff[level].keys()):
+        labels = []
+        children = [[] for _ in range(arity)]
+        for p, cs in stuff[level][arity]:
+          assert len(cs) == arity
+          labels.append(node_vectors[p])
+          for i, child_idx in enumerate(cs):
+            children[i].append(node_vectors[child_idx])
+
+        # Turn the lists of stuff into actual batches
+        labels = dy.concatenate_to_batch(labels)
+        children = [dy.concatenate_to_batch(children_i) for children_i in children]
+
+        # Compute the TreeGRU stuff
+        i = self.compute_gate('i', layer_idx, labels, children)
+        f = [self.compute_gate('f%d' % j, layer_idx, labels, children) for j in range(len(children))]
+        r = [self.compute_gate('r%d' % j, layer_idx, labels, children) for j in range(len(children))]
+        u = self.compute_u(layer_idx, labels, children, r)
+        h = self.compute_h(u, children, i, f)
+        assert len(stuff[level][arity]) == h.dim()[1]
+
+        # Update the node_vectors array with the results
+        for i, (p, _) in enumerate(stuff[level][arity]):
+          v = dy.pick_batch_elem(h, i)
+          node_vectors[p] = v
+
+    leaves, non_leaves = self.untransform(batch.trees, node_vectors)
+    return batchers.SyntaxTreeBatch(batch.trees, leaves, non_leaves)
+
+  def embed_tree_outside(self, batch: batchers.SyntaxTreeBatch, layer_idx):
+    # Topologically sort the trees in the batch
+    stuff, node_vectors = self.dtr_sort(batch)
+
+    # For each level (0 = root), and arity
+    # create a lists of nodes that need computed.
+    for level in sorted(stuff.keys()):
+      labels = []
+      parents = []
+      for idx, parent_idx in stuff[level]:
+        assert (level == 0) == (parent_idx == -1)
+        labels.append(node_vectors[idx])
+        if level != 0:
+          parents.append(node_vectors[parent_idx])
+
+      # Turn the lists of stuff into actual batches
+      labels = dy.concatenate_to_batch(labels)
+      if level != 0:
+        parents = dy.concatenate_to_batch(parents)
+
+      # Run the outside GRU to get new embeddings
+      print('DTR %d:' % level)
+      if level != 0:
+        print('Parents: ' + str(parents.dim()))
+      print('Labels: ' + str(labels.dim()))
+      if level != 0:
+        h = self.rev_gru.add_input_to_prev(parents, labels)
+        assert len(h) == 1
+        h = h[0]
+      else:
+        h = self.root_transform.transform(labels)
+      print('h: %s' % (str(type(h))))
+
+      # Update the node_vectors array with the results
+      for i, (p, _) in enumerate(stuff[level]):
+        v = dy.pick_batch_elem(h, i)
+        node_vectors[p] = v
+
+    leaves, non_leaves = self.untransform(batch.trees, node_vectors)
+    return batchers.SyntaxTreeBatch(batch.trees, leaves, non_leaves)
+
+  def encode_tree(self, batch: batchers.SyntaxTreeBatch):
+    term_seqs = []
+    term_index = 0
+    print('Sent lengths: ' + str([len(tree.get_terminals()) for tree in batch.trees]))
+    print('Old leaves:' + str(batch.leaves.dim()))
+    for tree in batch.trees:
+      # First a bit of bounds checking
+      num_terms = len(tree.get_terminals())
+      assert term_index + num_terms <= batch.leaves.dim()[1]
+
+      # Create a terminal sequence for this tree
+      # starting with <s> and ending with </s>
+      term_seqs.append([])
+      term_seqs[-1].append(batch.SS)
+      for i in range(term_index, term_index + num_terms):
+        term_seqs[-1].append(dy.pick_batch_elem(batch.leaves, i))
+      term_seqs[-1].append(batch.ES)
+
+      # Update start index
+      term_index += num_terms
+
+    # Done with loop. Make sure everything went as expected.
+    assert term_index == batch.leaves.dim()[1]
+
+    # Pad the terminal sequences to the max length
+    longest = max([len(seq) for seq in term_seqs]) 
+    for i in range(len(term_seqs)):
+      padding = longest - len(term_seqs[i])
+      term_seqs[i] = term_seqs[i] + [batch.ES] * padding
+    batched = []
+    for i in range(longest):
+      yay = dy.concatenate_to_batch([seq[i] for seq in term_seqs])
+      batched.append(yay)
+    batched = expression_seqs.ExpressionSequence(batched)
+    print('batched: ' + str(batched.dim()))
+
+    # Transduce the terminals using the encoder (usually a BiLSTM)
+    encoded_terms = self.term_encoder.transduce(batched)
+    new_leaves = []
+    for tree in batch.trees:
+      num_terms = len(tree.get_terminals())
+      x = encoded_terms[1:num_terms + 1]
+      x = [dy.pick_batch_elem(xj, i) for xj in x]
+      new_leaves += x 
+    new_leaves = dy.concatenate_to_batch(new_leaves)
+    print('New leaves: ' + str(new_leaves.dim()))
+
+    r = batchers.SyntaxTreeBatch(batch.trees, new_leaves, batch.non_leaves)
+    return r
+
+  def combine_trees(self, batches: List[batchers.SyntaxTreeBatch]) -> batchers.SyntaxTreeBatch:
+    for batch in batches[1:]:
+      assert batch.trees == batches[0].trees
+
+    leaves = dy.esum([batch.leaves for batch in batches])
+    non_leaves = dy.esum([batch.non_leaves for batch in batches])
+    return batchers.SyntaxTreeBatch(batches[0].trees, leaves, non_leaves)
+
+  def embed_tree(self, batch: batchers.SyntaxTreeBatch, layer_idx):
+    encoded = self.encode_tree(batch) if layer_idx == 0 else tree
+    inside = self.embed_tree_inside(encoded, layer_idx)
+    outside = self.embed_tree_outside(inside, layer_idx)
+    combined = self.combine_trees([inside, outside])
+    return combined
+
+  def linearize(self, batch: batchers.SyntaxTreeBatch) -> expression_seqs.ExpressionSequence:
+    nodes, vectors = self.transform(batch)
+    assert len(nodes) == len(vectors)
+
+    print('v[0][0]: ' + str(vectors[0][0].dim()))
+    zeros = dy.zeros(vectors[0][0].dim()[0])
+    print('zeros: ' + str(zeros.dim()))
+    max_len = max([len(v) for v in vectors])
+
+    for i in range(len(nodes)):
+      n = nodes[i]
+      v = vectors[i]
+      assert len(n) == len(v)
+      v += [zeros] * (max_len - len(v))
+
+    for v in vectors:
+      assert len(v) == max_len
+
+    print('Vectors is ' + str(len(vectors)) + ' by ' + str([len(v) for v in vectors]))
+    for v in vectors:
+      for x in v:
+        print(x.dim())
+
+    steps = [[vectors[i][j] for i in range(len(vectors))] for j in range(max_len)]
+    steps = [dy.concatenate_to_batch(s) for s in steps]
+    steps = expression_seqs.ExpressionSequence(steps)
+    print('Steps: ' + str(steps.dim()))
+    return steps
+
+  def transduce(self, batch: batchers.SyntaxTreeBatch) -> expression_seqs.ExpressionSequence:
+    for layer_idx in range(self.layers):
+      batch = self.embed_tree(batch, layer_idx)
+    return self.linearize(batch)
 
   def shared_params(self):
     return [{".term_encoder.input_dim", ".input_dim"},
