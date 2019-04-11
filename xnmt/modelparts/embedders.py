@@ -546,8 +546,10 @@ class SyntaxTreeEmbedder(Embedder, Serializable):
     return batchers.SyntaxTreeBatch(batch.trees, leaves, non_leaves)
 
   def embed_sent(self, tree) -> SyntaxTree:
-    batched = batchers.is_batched(tree)
-    r = self.embed_batch(tree) if batched else self.embed_single_sent(tree)
+    if type(tree) == batchers.ListBatch:
+      r = self.embed_single_sent(tree[0])
+    else:
+      r = self.embed_batch(tree)
     r.SS = dy.lookup(self.term_embeddings, vocabs.Vocab.SS)
     r.ES = dy.lookup(self.term_embeddings, vocabs.Vocab.ES)
     return r

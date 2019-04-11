@@ -585,11 +585,13 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     out_nodes.append(tree)
     if len(tree.children) == 0:
       assert term_idx < term_vecs.dim()[1]
-      out_vectors.append(dy.pick_batch_elem(term_vecs, term_idx))
+      vec = dy.pick_batch_elem(term_vecs, term_idx)
+      out_vectors.append(vec)
       term_idx += 1
     else:
       assert nt_idx < nt_vecs.dim()[1]
-      out_vectors.append(dy.pick_batch_elem(nt_vecs, nt_idx))
+      vec = dy.pick_batch_elem(nt_vecs, nt_idx)
+      out_vectors.append(vec)
       nt_idx += 1
       for child in tree.children:
         term_idx, nt_idx = self.transform_single(child, term_vecs, nt_vecs, term_idx, nt_idx, out_nodes, out_vectors)
@@ -613,19 +615,20 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     assert len(node_vectors) == tree.idx
     if len(tree.children) == 0:
       assert term_idx < term_vecs.dim()[1]
-      node_vectors.append(dy.pick_batch_elem(term_vecs, term_idx))
+      vec = dy.pick_batch_elem(term_vecs, term_idx)
+      node_vectors.append(vec)
       term_idx += 1
       tree.dtl = 0
       arity = 0
     else:
       assert nt_idx < nt_vecs.dim()[1]
-      node_vectors.append(dy.pick_batch_elem(nt_vecs, nt_idx))
+      vec = dy.pick_batch_elem(nt_vecs, nt_idx)
+      node_vectors.append(vec)
       nt_idx += 1
       for child in tree.children:
         term_idx, nt_idx = self.dtl_sort_single(child, term_vecs, nt_vecs, stuff, term_idx, nt_idx, node_vectors)
       tree.dtl = max([child.dtl for child in tree.children]) + 1
       arity = len(tree.children)
-    print('At level %d nodes %s build into node %s' % (tree.dtl, str([child.idx for child in tree.children]), str(tree.idx)))
     stuff[tree.dtl][arity].append((tree.idx, [child.idx for child in tree.children]))
     return term_idx, nt_idx
 
@@ -634,30 +637,38 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     assert len(node_vectors) == tree.idx
     if len(tree.children) == 0:
       assert term_idx < term_vecs.dim()[1]
-      node_vectors.append(dy.pick_batch_elem(term_vecs, term_idx))
+      vec = dy.pick_batch_elem(term_vecs, term_idx)
+      node_vectors.append(vec)
       term_idx += 1
       tree.dtr = dtr
       arity = 0
     else:
       assert nt_idx < nt_vecs.dim()[1]
-      node_vectors.append(dy.pick_batch_elem(nt_vecs, nt_idx))
+      vec = dy.pick_batch_elem(nt_vecs, nt_idx)
+      node_vectors.append(vec)
       nt_idx += 1
       tree.dtr = dtr
       arity = len(tree.children)
       for child in tree.children:
         term_idx, nt_idx = self.dtr_sort_single(child, term_vecs, nt_vecs, stuff, term_idx, nt_idx, node_vectors, dtr + 1, tree.idx)
-    print('Node %d dtr is %d, parent is %d' % (tree.idx, dtr, parent_idx))
     stuff[dtr].append((tree.idx, parent_idx))
     return term_idx, nt_idx
 
-  def dtl_sort(self, batch: batchers.SyntaxTreeBatch, stuff=defaultdict(lambda: defaultdict(list)), term_idx=0, nt_idx=0, node_vectors=[]):
-    print('Term vecs: ' + str(batch.leaves.dim()))
-    print('NT vecs: ' + str(batch.non_leaves.dim()))
+  def dtl_sort(self, batch: batchers.SyntaxTreeBatch, stuff=None, term_idx=0, nt_idx=0, node_vectors=None):
+    if stuff is None:
+      stuff = defaultdict(lambda: defaultdict(list))
+    if node_vectors is None:
+      node_vectors = []
+
     for tree in batch.trees:
       term_idx, nt_idx = self.dtl_sort_single(tree, batch.leaves, batch.non_leaves, stuff, term_idx, nt_idx, node_vectors)
     return stuff, node_vectors
 
-  def dtr_sort(self, batch: batchers.SyntaxTreeBatch, stuff=defaultdict(list), term_idx=0, nt_idx=0, node_vectors=[]):
+  def dtr_sort(self, batch: batchers.SyntaxTreeBatch, stuff=None, term_idx=0, nt_idx=0, node_vectors=None):
+    if stuff is None:
+      stuff = defaultdict(list)
+    if node_vectors is None:
+      node_vectors = []
     for tree in batch.trees:
       term_idx, nt_idx = self.dtr_sort_single(tree, batch.leaves, batch.non_leaves, stuff, term_idx, nt_idx, node_vectors)
     return stuff, node_vectors
@@ -692,7 +703,6 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
 
   def untransform_single(self, tree, node_vectors, leaves, non_leaves, term_idx, nt_idx):
     idx = term_idx + nt_idx
-    print('Untransforming node %d (%d/%d). Array lengths are %d, %d, and %d' % (idx, term_idx, nt_idx, len(node_vectors), len(leaves), len(non_leaves)))
     assert idx < len(node_vectors)
     assert term_idx == len(leaves)
     assert nt_idx == len(non_leaves)
@@ -771,17 +781,12 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         parents = dy.concatenate_to_batch(parents)
 
       # Run the outside GRU to get new embeddings
-      print('DTR %d:' % level)
-      if level != 0:
-        print('Parents: ' + str(parents.dim()))
-      print('Labels: ' + str(labels.dim()))
       if level != 0:
         h = self.rev_gru.add_input_to_prev(parents, labels)
         assert len(h) == 1
         h = h[0]
       else:
         h = self.root_transform.transform(labels)
-      print('h: %s' % (str(type(h))))
 
       # Update the node_vectors array with the results
       for i, (p, _) in enumerate(stuff[level]):
@@ -794,8 +799,6 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
   def encode_tree(self, batch: batchers.SyntaxTreeBatch):
     term_seqs = []
     term_index = 0
-    print('Sent lengths: ' + str([len(tree.get_terminals()) for tree in batch.trees]))
-    print('Old leaves:' + str(batch.leaves.dim()))
     for tree in batch.trees:
       # First a bit of bounds checking
       num_terms = len(tree.get_terminals())
@@ -806,7 +809,8 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
       term_seqs.append([])
       term_seqs[-1].append(batch.SS)
       for i in range(term_index, term_index + num_terms):
-        term_seqs[-1].append(dy.pick_batch_elem(batch.leaves, i))
+        vec = dy.pick_batch_elem(batch.leaves, i)
+        term_seqs[-1].append(vec)
       term_seqs[-1].append(batch.ES)
 
       # Update start index
@@ -825,18 +829,16 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
       yay = dy.concatenate_to_batch([seq[i] for seq in term_seqs])
       batched.append(yay)
     batched = expression_seqs.ExpressionSequence(batched)
-    print('batched: ' + str(batched.dim()))
 
     # Transduce the terminals using the encoder (usually a BiLSTM)
     encoded_terms = self.term_encoder.transduce(batched)
     new_leaves = []
-    for tree in batch.trees:
+    for i, tree in enumerate(batch.trees):
       num_terms = len(tree.get_terminals())
       x = encoded_terms[1:num_terms + 1]
       x = [dy.pick_batch_elem(xj, i) for xj in x]
       new_leaves += x 
     new_leaves = dy.concatenate_to_batch(new_leaves)
-    print('New leaves: ' + str(new_leaves.dim()))
 
     r = batchers.SyntaxTreeBatch(batch.trees, new_leaves, batch.non_leaves)
     return r
@@ -860,9 +862,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     nodes, vectors = self.transform(batch)
     assert len(nodes) == len(vectors)
 
-    print('v[0][0]: ' + str(vectors[0][0].dim()))
     zeros = dy.zeros(vectors[0][0].dim()[0])
-    print('zeros: ' + str(zeros.dim()))
     max_len = max([len(v) for v in vectors])
 
     for i in range(len(nodes)):
@@ -874,18 +874,20 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     for v in vectors:
       assert len(v) == max_len
 
-    print('Vectors is ' + str(len(vectors)) + ' by ' + str([len(v) for v in vectors]))
-    for v in vectors:
-      for x in v:
-        print(x.dim())
-
     steps = [[vectors[i][j] for i in range(len(vectors))] for j in range(max_len)]
     steps = [dy.concatenate_to_batch(s) for s in steps]
     steps = expression_seqs.ExpressionSequence(steps)
-    print('Steps: ' + str(steps.dim()))
     return steps
 
   def transduce(self, batch: batchers.SyntaxTreeBatch) -> expression_seqs.ExpressionSequence:
+    if type(batch) == SyntaxTree:
+      SS = batch.SS
+      ES = batch.ES
+      batch = batchers.SyntaxTreeBatcher()._make_src_batch([batch])
+      batch.leaves = dy.concatenate_to_batch(batch.leaves)
+      batch.non_leaves = dy.concatenate_to_batch(batch.non_leaves)
+      batch.SS = SS
+      batch.ES = ES
     for layer_idx in range(self.layers):
       batch = self.embed_tree(batch, layer_idx)
     return self.linearize(batch)

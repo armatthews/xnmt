@@ -101,6 +101,9 @@ class SyntaxTreeBatch(Batch):
   def __getitem__(self, key):
     raise NotImplementedError()
 
+  def __str__(self):
+    return str(self.trees)
+
 class Mask(object):
   """
   An immutable mask specifies padded parts in a sequence or batch of sequences.
