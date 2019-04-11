@@ -852,7 +852,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     return batchers.SyntaxTreeBatch(batches[0].trees, leaves, non_leaves)
 
   def embed_tree(self, batch: batchers.SyntaxTreeBatch, layer_idx):
-    encoded = self.encode_tree(batch) if layer_idx == 0 else tree
+    encoded = self.encode_tree(batch) if layer_idx == 0 else batch
     inside = self.embed_tree_inside(encoded, layer_idx)
     outside = self.embed_tree_outside(inside, layer_idx)
     combined = self.combine_trees([inside, outside])
