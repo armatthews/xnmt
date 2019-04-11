@@ -179,7 +179,8 @@ class CoverageAttender(Attender, Serializable):
     self.WI = safe_affine_transform([self.b, self.W, I])
     batch_size = sent.batch_size() if batchers.is_batched(sent) else sent.dim()[1]
     sent_len = I.dim()[0][1]
-    return dy.zeros((self.coverage_dim, sent_len), batch_size=batch_size)
+    r = dy.zeros((self.coverage_dim, sent_len), batch_size=batch_size)
+    return r
 
   def calc_attention(self, dec_state: dy.Expression, att_state: AttenderState = None) -> dy.Expression:
     assert att_state is not None
@@ -260,28 +261,73 @@ class SyntaxCoverageAttender(CoverageAttender, Serializable):
 
     return child_map, mask
 
+  def transpose(self, a):
+    if len(a) == 0:
+      return []
+
+    r = []
+    for i in range(len(a[0])):
+      r.append([row[i] for row in a])
+    return r
+
   def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> None:
-    if batchers.is_batched(sent):
-      assert sent.batch_size() == 1, 'SyntaxConverageAttender only supports batch size of 1 but got a batch size of %d' % (sent.batch_size())
-      if type(sent) == batchers.ListBatch:
-        sent = sent[0]
+    if type(sent) == batchers.ListBatch:
+      assert sent.batch_size() == 1
+      sent = sent[0]
     if type(sent) == SyntaxTree:
       sent = batchers.SyntaxTreeBatcher()._make_src_batch([sent])
 
-    self.left_child_map, self.left_mask = self.build_child_map(sent.trees[0], 0)
-    self.right_child_map, self.right_mask = self.build_child_map(sent.trees[0], 1)
-    self.left_mask = dy.inputVector(self.left_mask)
-    self.right_mask = dy.inputVector(self.right_mask)
+    self.left_child_map = []
+    self.right_child_map = []
+    self.left_mask = []
+    self.right_mask = []
+
+    for tree in sent.trees:
+      left_child_map, left_mask = self.build_child_map(tree, 0)
+      right_child_map, right_mask = self.build_child_map(tree, 1)
+
+      self.left_child_map.append(left_child_map)
+      self.right_child_map.append(right_child_map)
+      self.left_mask.append(left_mask)
+      self.right_mask.append(right_mask)
+
+    assert len(self.left_child_map) == sent.batch_size()
+    assert len(self.left_child_map) == len(self.right_child_map)
+    assert len(self.left_child_map) == len(self.left_mask)
+    assert len(self.left_child_map) == len(self.right_mask)
+    for i in range(len(self.left_child_map)):
+      assert len(self.left_child_map[i]) == len(self.right_child_map[i])
+      assert len(self.left_child_map[i]) == len(self.left_mask[i])
+      assert len(self.left_child_map[i]) == len(self.right_mask[i])
+
+    longest = len(max(self.left_child_map, key=len))
+    for i in range(len(self.left_child_map)):
+      diff = longest - len(self.left_child_map[i])
+      self.left_child_map[i] += [0] * diff
+      self.left_mask[i] += [0] * diff
+      self.right_child_map[i] += [0] * diff
+      self.right_mask[i] += [0] * diff
+
+
+    self.left_mask = dy.inputTensor(self.transpose(self.left_mask), batched=True)
+    self.right_mask = dy.inputTensor(self.transpose(self.right_mask), batched=True)
     return super().init_sent(encoded, sent)
+
+  def select_from_state(self, state, child_map, mask):
+    r = []
+    for i, row in enumerate(child_map):
+      selected = dy.select_cols(dy.pick_batch_elem(state, i), row)
+      r.append(selected)
+    r = dy.concatenate_to_batch(r)
+    r = dy.cmult(r, mask)
+    return selected
 
   def update(self, dec_state, att_state: AttenderState, attention: dy.Expression):
     dec_state_b = dy.concatenate_cols([dec_state for _ in range(self.I.dim()[0][1])])
 
     state = dy.concatenate([att_state, dy.transpose(attention)])
-    left_state = dy.select_cols(state, self.left_child_map)
-    left_state = dy.cmult(left_state, dy.transpose(self.left_mask))
-    right_state = dy.select_cols(state, self.left_child_map)
-    right_state = dy.cmult(right_state, dy.transpose(self.right_mask))
+    left_state = self.select_from_state(state, self.left_child_map, dy.transpose(self.left_mask))
+    right_state = self.select_from_state(state, self.right_child_map, dy.transpose(self.right_mask))
 
     h_in = dy.concatenate([self.I, dy.transpose(attention), dec_state_b, left_state, right_state])
     h_out = self.coverage_updater.add_input_to_prev(att_state, h_in)[0]
