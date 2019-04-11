@@ -104,7 +104,7 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
     embeddings = self.src_embedder.embed_sent(src)
     encoding = self.encoder.transduce(embeddings)
     final_state = self.encoder.get_final_states()
-    initial_att_state = self.attender.init_sent(encoding)
+    initial_att_state = self.attender.init_sent(encoding, src)
     ss = batchers.mark_as_batch([vocabs.Vocab.SS] * src.batch_size()) if batchers.is_batched(src) else vocabs.Vocab.SS
     initial_dec_state = self.decoder.initial_state(final_state, ss)
     return initial_dec_state, initial_att_state

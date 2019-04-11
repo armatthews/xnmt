@@ -9,6 +9,7 @@ from xnmt import batchers, expression_seqs, events, param_collections, param_ini
 from xnmt.modelparts import decoders
 from xnmt.persistence import serializable_init, Serializable, Ref, bare
 from xnmt.transducers import recurrent
+from xnmt.sent import SyntaxTree
 
 class AttenderState(object):
   pass
@@ -18,9 +19,12 @@ class Attender(object):
   A template class for functions implementing attention.
   """
 
-  def init_sent(self, sent: expression_seqs.ExpressionSequence) -> AttenderState:
+  def init_sent(self, encoding: expression_seqs.ExpressionSequence, sent) -> AttenderState:
     """Args:
-         sent: the encoder states, aka keys and values. Usually but not necessarily an :class:`expression_seqs.ExpressionSequence`
+         encoding: the encoder states, aka keys and values. Usually but not necessarily an :class:`expression_seqs.ExpressionSequence`
+         sent: the raw source sentence
+       Returns:
+         An initial state of the attender, representing not yet having attended to anything.
     """
     raise NotImplementedError('init_sent must be implemented for Attender subclasses')
 
@@ -93,9 +97,9 @@ class MlpAttender(Attender, Serializable):
     self.U = param_collection.add_parameters((1, hidden_dim), init=param_init.initializer((1, hidden_dim)))
     self.curr_sent = None
 
-  def init_sent(self, sent: expression_seqs.ExpressionSequence) -> None:
+  def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> None:
     self.attention_vecs = []
-    self.curr_sent = sent
+    self.curr_sent = encoded
     I = self.curr_sent.as_tensor()
     self.WI = safe_affine_transform([self.b, self.W, I])
     return None
@@ -132,7 +136,6 @@ class CoverageAttender(Attender, Serializable):
 
   yaml_tag = '!CoverageAttender'
 
-
   @serializable_init
   def __init__(self,
                input_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
@@ -160,18 +163,23 @@ class CoverageAttender(Attender, Serializable):
         "coverage_updater",
         coverage_updater,
         lambda: recurrent.UniGRUSeqTransducer(
-            input_dim=(self.state_dim + self.hidden_dim + 1),
+            input_dim=self.get_input_dim(),
             hidden_dim=self.coverage_dim,
             param_init=param_init,
             bias_init=bias_init))
 
-  def init_sent(self, sent: expression_seqs.ExpressionSequence) -> None:
+  def get_input_dim(self):
+    return self.state_dim + self.hidden_dim + 1
+
+  def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> None:
     self.attention_vecs = []
-    self.curr_sent = sent
+    self.curr_sent = encoded
     I = self.curr_sent.as_tensor()
     self.I = I
     self.WI = safe_affine_transform([self.b, self.W, I])
-    return dy.zeros((self.coverage_dim, len(sent)), batch_size=sent.dim()[1])
+    batch_size = sent.batch_size() if batchers.is_batched(sent) else sent.dim()[1]
+    sent_len = I.dim()[0][1]
+    return dy.zeros((self.coverage_dim, sent_len), batch_size=batch_size)
 
   def calc_attention(self, dec_state: dy.Expression, att_state: AttenderState = None) -> dy.Expression:
     assert att_state is not None
@@ -197,6 +205,85 @@ class CoverageAttender(Attender, Serializable):
   def update(self, dec_state, att_state: AttenderState, attention: dy.Expression):
     dec_state_b = dy.concatenate_cols([dec_state for _ in range(self.I.dim()[0][1])])
     h_in = dy.concatenate([self.I, dy.transpose(attention), dec_state_b])
+    h_out = self.coverage_updater.add_input_to_prev(att_state, h_in)[0]
+    assert h_out.dim() == att_state.dim()
+    return h_out
+
+class SyntaxCoverageAttender(CoverageAttender, Serializable):
+  """
+  Implements the attention model of Chen et. al (2017)
+  "Improved Neural Machine Translation with a Syntax-Aware Encoder and Decoder"
+
+  Args:
+    input_dim: input dimension
+    state_dim: dimension of dec_state inputs
+    hidden_dim: hidden MLP dimension
+    param_init: how to initialize weight matrices
+    bias_init: how to initialize bias vectors
+    truncate_dec_batches: whether the decoder drops batch elements as soon as these are masked at some time step.
+  """
+
+  yaml_tag = '!SyntaxCoverageAttender'
+
+  @serializable_init
+  def __init__(self,
+               input_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               state_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               hidden_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               coverage_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               coverage_updater = None,
+               param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
+               bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer)),
+               truncate_dec_batches: bool = Ref("exp_global.truncate_dec_batches", default=False)) -> None:
+    super().__init__(input_dim, state_dim, hidden_dim, coverage_dim, coverage_updater, param_init, bias_init, truncate_dec_batches)
+
+  def get_input_dim(self):
+    return self.hidden_dim + self.state_dim + 1 + 2 * (self.coverage_dim + 1)
+
+  def build_child_map(self, tree, child_idx):
+    child_map = []
+    mask = []
+
+    if len(tree.children) > child_idx:
+      child = tree.children[child_idx]
+      assert child.idx is not None
+      child_map.append(child.idx)
+      mask.append(1.0)
+    else:
+      child_map.append(0)
+      mask.append(0.0)
+
+    for child in tree.children:
+      c, m = self.build_child_map(child, child_idx)
+      child_map += c
+      mask += m
+
+    return child_map, mask
+
+  def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> None:
+    if batchers.is_batched(sent):
+      assert sent.batch_size() == 1, 'SyntaxConverageAttender only supports batch size of 1 but got a batch size of %d' % (sent.batch_size())
+      if type(sent) == batchers.ListBatch:
+        sent = sent[0]
+    if type(sent) == SyntaxTree:
+      sent = batchers.SyntaxTreeBatcher()._make_src_batch([sent])
+
+    self.left_child_map, self.left_mask = self.build_child_map(sent.trees[0], 0)
+    self.right_child_map, self.right_mask = self.build_child_map(sent.trees[0], 1)
+    self.left_mask = dy.inputVector(self.left_mask)
+    self.right_mask = dy.inputVector(self.right_mask)
+    return super().init_sent(encoded, sent)
+
+  def update(self, dec_state, att_state: AttenderState, attention: dy.Expression):
+    dec_state_b = dy.concatenate_cols([dec_state for _ in range(self.I.dim()[0][1])])
+
+    state = dy.concatenate([att_state, dy.transpose(attention)])
+    left_state = dy.select_cols(state, self.left_child_map)
+    left_state = dy.cmult(left_state, dy.transpose(self.left_mask))
+    right_state = dy.select_cols(state, self.left_child_map)
+    right_state = dy.cmult(right_state, dy.transpose(self.right_mask))
+
+    h_in = dy.concatenate([self.I, dy.transpose(attention), dec_state_b, left_state, right_state])
     h_out = self.coverage_updater.add_input_to_prev(att_state, h_in)[0]
     assert h_out.dim() == att_state.dim()
     return h_out
