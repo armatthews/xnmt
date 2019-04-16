@@ -514,15 +514,16 @@ class SyntaxTreeReader(BaseTextReader, Serializable):
   yaml_tag = "!SyntaxTreeReader"
 
   @serializable_init
-  def __init__(self, nt_vocab, term_vocab):
+  def __init__(self, nt_vocab, term_vocab, add_bos_eos=False):
     self.nt_vocab = nt_vocab
     self.vocab = term_vocab
+    self.add_bos_eos = add_bos_eos
     self.output_procs = None
 
   def read_sent(self, line, idx):
     assert self.nt_vocab is not None
     assert self.term_vocab is not None
-    tree = sent.SyntaxTree.from_string(line, self.nt_vocab, self.vocab, idx)
+    tree = sent.SyntaxTree.from_string(line, self.nt_vocab, self.vocab, idx, self.add_bos_eos)
     return tree
 
   def make_sent(self, **kwargs):

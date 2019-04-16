@@ -276,15 +276,25 @@ class SimpleSentence(ReadableSentence):
                           output_procs=self.output_procs,
                           pad_token=self.pad_token)
 
-class SyntaxTree(Sentence):
-  """
-  A syntax tree, represented recursively
-  """
-
-  def __init__(self, label, children, idx=None, score=None):
-    super().__init__(idx, score)
+class SyntaxTreeNode:
+  def __init__(self, label, parent, children=None):
     self.label = label
-    self.children = children
+    self.parent = parent
+    self.children = children if children else []
+
+  def annotate(self, idx=0):
+    self.dtr = 0 if self.parent is None else self.parent.dtr + 1
+    self.idx = idx
+    idx += 1
+    for child in self.children:
+      idx = child.annotate(idx)
+    if len(self.children) == 0:
+      self.min_dtl = 0
+      self.max_dtl = 0
+    else:
+      self.min_dtl = min([child.min_dtl for child in self.children]) + 1
+      self.max_dtl = max([child.max_dtl for child in self.children]) + 1
+    return idx
 
   def __repr__(self):
     if len(self.children) == 0:
@@ -294,127 +304,106 @@ class SyntaxTree(Sentence):
   def __str__(self):
     return repr(self)
 
-  def batch_size(self):
-    import batchers
-    return self.label.batch_size() if batchers.is_batched(self.label) else 1
-
-  def sent_len(self):
-    if len(self.children) == 0:
-      return 1
-    else:
-      return sum(child.sent_len() for child in self.children)
-
   def get_terminals(self):
     if len(self.children) == 0:
       return [self.label]
     else:
       return sum((child.get_terminals() for child in self.children), [])
 
+  def nodes(self):
+    for node in iter(self):
+      yield node
+
+  def __iter__(self):
+    yield self
+    for child in self.children:
+      for node in iter(child):
+        yield node
+
+class SyntaxTree(Sentence):
+  def __init__(self, structure, node_vectors, idx=None):
+    self.structure = structure
+    self.node_vectors = node_vectors
+    self.idx = idx
+
+  def __repr__(self):
+    return repr(self.structure)
+
+  def __str__(self):
+    return str(self.structure)
+
+  def nodes(self):
+    for node in iter(self.structure):
+      yield node
+
   @staticmethod
-  def from_string(line, nt_vocab, term_vocab, idx=None, depth=0):
+  def from_string(line, nt_vocab, term_vocab, idx=None, add_bos_eos=False):
     line = line.strip()
+
+    # Berkeley Parser likes to add an extra layer of parens
+    # separate by spaces for whatever reason.
     if line.startswith('( ') and line.endswith(' )'):
-      # Berkeley Parser likes to add an extra layer of parens
-      # separate by spaces for whatever reason.
       line = line[2:-2]
 
-    # if it's a terminal
-    if not line.startswith('('):
-      assert ' ' not in line
-      label = term_vocab.convert(line)
-      return SyntaxTree(label, [], idx)
-    else:
-      assert line.endswith(')')
-      line = line[1:-1]
-      first_space = line.find(' ')
-      assert first_space >= 0
-      label = line[:first_space]
-      line = line[first_space + 1:]
+    i = 0
+    structure = None
+    curr_node = None
+    node_vectors = []
 
-      child_strings = []
-      cur_child = []
-      paren_depth = 0
-      for i, c in enumerate(line):
-        assert paren_depth >= 0
-        if paren_depth == 0 and c == ' ':
-          if cur_child:
-            child_strings.append(''.join(cur_child))
-            cur_child = []
+    if add_bos_eos:
+      # Add BOS and EOS to the syntax tree, maintaining binariness.
+      bos_nt = nt_vocab.SS_STR
+      bos_term = term_vocab.SS_STR
+      eos_nt = nt_vocab.ES_STR
+      eos_term = term_vocab.ES_STR
+      bos_part = '(%s %s)' % (bos_nt, bos_term)
+      eos_part = '(%s %s)' % (eos_nt, eos_term)
+      line = '(%s %s (%s %s (%s %s)))' % (bos_nt, bos_part, eos_nt, line, eos_nt, eos_term)
+
+    while i < len(line):
+      if line[i] == ' ':
+        i += 1
+        continue
+
+      if line[i] == '(':
+        # nt
+        next_space = line.find(' ', i+1)
+        nt = line[i+1:next_space]
+        node_vectors.append(nt_vocab.convert(nt))
+        new_node = SyntaxTreeNode(nt, curr_node)
+        if structure is None:
+          structure = new_node
         else:
-          cur_child.append(c)
+          curr_node.children.append(new_node)
+        curr_node = new_node
+        i = next_space + 1
 
-        if c == '(':
-          paren_depth += 1
-        elif c == ')':
-          paren_depth -= 1
-          if paren_depth == 0:
-            cur_child = ''.join(cur_child)
-            assert cur_child.startswith('(') and cur_child.endswith(')')
-            child_strings.append(cur_child)
-            cur_child = []
+      elif line[i] == ')':
+        # reduce
+        curr_node = curr_node.parent
+        i += 1
 
-    if cur_child:
-      child_strings.append(''.join(cur_child))
-      cur_child = []
-    assert paren_depth >= 0
-
-    children = []
-    for child in child_strings:
-      child_node = SyntaxTree.from_string(child, nt_vocab, term_vocab, depth=depth+1)
-      children.append(child_node)
-    assert len(children) > 0
-    label = nt_vocab.convert(label)
-    return SyntaxTree(label, children, idx)
-
-
-  @functools.lru_cache(maxsize=1)
-  def len_unpadded(self):
-    raise NotImplementedError()
-
-  def __getitem__(self, key):
-    assert key < self.sent_len()
-
-    if len(self.children) == 0:
-      assert key == 0
-      return self.label
-
-    n = 0
-    for child in self.children:
-      child_len = child.sent_len()
-      if key < n + child_len:
-        return child[key - n]
       else:
-        n += child_len
-    assert False 
+        # terminal
+        next_paren = line.find(')', i + 1)
+        term = line[i : next_paren]
+        node_vectors.append(term_vocab.convert(term))
+        curr_node.children.append(SyntaxTreeNode(term, curr_node))
+        i = next_paren
 
-  def get_padded_sent(self, token, pad_len):
-    raise NotImplementedError()
-
-  def get_truncated_sent(self, trunc_len: int) -> 'Input':
-    raise NotImplementedError()
+    structure.annotate()
+    return SyntaxTree(structure, node_vectors)
 
   def str_tokens(self, exclude_ss_es=True, exclude_unk=False, exclude_padded=True, **kwargs) -> List[str]:
-    exclude_set = set()
-    if exclude_ss_es:
-      exclude_set.add(Vocab.SS)
-      exclude_set.add(Vocab.ES)
-    if exclude_unk: exclude_set.add(self.vocab.unk_token)
-    # TODO: exclude padded if requested (i.e., all </s> tags except for the first)
-    ret_toks =  [w for w in self.words if w not in exclude_set]
-    if self.vocab: return [self.vocab[w] for w in ret_toks]
-    else: return [str(w) for w in ret_toks]
+    pass
 
-  def sent_with_new_words(self, new_words):
-    unpadded_sent = self.unpadded_sent
-    if not unpadded_sent:
-      if self.sent_len()==self.len_unpadded(): unpadded_sent = self
-    return SimpleSentence(words=new_words,
-                          idx=self.idx,
-                          vocab=self.vocab,
-                          score=self.score,
-                          output_procs=self.output_procs,
-                          pad_token=self.pad_token,
-                          unpadded_sent=unpadded_sent)
+  def sent_len(self) -> int:
+    return len(list(self.nodes()))
+
+  def create_padded_sent(self, pad_len: numbers.Integral):
+    if pad_len != 0:
+      raise ValueError("SyntaxTrees cannot be padded")
+    return self
 
 class RnngSentence(ReadableSentence):
   def __init__(self, words, vocab, idx=None, score=None, output_procs:Union[OutputProcessor, Sequence[OutputProcessor]] = []):
@@ -426,7 +415,7 @@ class RnngSentence(ReadableSentence):
     ret = self.words[key]
     if isinstance(ret, list):  # support for slicing
       return RnngSentence(words=ret, vocab=self.vocab, idx=self.idx, score=self.score, output_procs=self.output_procs)
-    return ret 
+    return ret
 
   def sent_len(self):
     return len(self.words)

@@ -518,41 +518,44 @@ class SyntaxTreeEmbedder(Embedder, Serializable):
 
   @events.handle_xnmt_event
   def on_start_sent(self, src):
-    self.word_id_mask = None
+    self.word_id_mask = None 
 
-  def embed_single_sent(self, tree) -> SyntaxTree:
-    batched = batchers.is_batched(tree.label)
-    if not batched:
-      children = [self.embed_single_sent(child) for child in tree.children]
-      embs = self.nt_embeddings if len(children) > 0 else self.term_embeddings
-      label = embs[tree.label]
-      emb_tree = SyntaxTree(label, children)
-    else:
-      children = [self.embed_single_sent(child) for child in tree.children]
-      embs = []
-      for i in range(tree.label.batch_size()):
-        is_terminal = (False in [child.mask[i] for child in children])
-        emb_table = self.nt_embeddings if is_terminal else self.term_embeddings
-        emb = emb_table[tree.label[i]]
-        embs.append(emb)
-      label = dy.concatenate_to_batch(embs)
-      emb_tree = SyntaxTree(label, children)
-      emb_tree.mask = tree.mask
-    return emb_tree
+  def embed_sent(self, batch: batchers.SyntaxTreeBatch) -> batchers.SyntaxTreeBatch:
+    if type(batch) == batchers.ListBatch:
+      assert batch.batch_size() == 1
+      batch = batchers.SyntaxTreeBatch([batch[0].structure], [len(list(batch[0].nodes()))], batch[0].node_vectors)
 
-  def embed_batch(self, batch):
-    leaves = dy.lookup_batch(self.term_embeddings, batch.leaves)
-    non_leaves = dy.lookup_batch(self.nt_embeddings, batch.non_leaves)
-    return batchers.SyntaxTreeBatch(batch.trees, leaves, non_leaves)
+    assert type(batch) == batchers.SyntaxTreeBatch, 'Expected SyntaxTreeBatch but got %s' % str(type(batch))
 
-  def embed_sent(self, tree) -> SyntaxTree:
-    if type(tree) == batchers.ListBatch:
-      r = self.embed_single_sent(tree[0])
-    else:
-      r = self.embed_batch(tree)
-    r.SS = dy.lookup(self.term_embeddings, vocabs.Vocab.SS)
-    r.ES = dy.lookup(self.term_embeddings, vocabs.Vocab.ES)
-    return r
+    # Loop over the nodes in the batch and sort them into
+    # a list of terminals and a list of NTs
+    terms = []
+    nts = []
+    assert len(list(batch.nodes())) == len(batch.node_vectors)
+    for node, v in zip(batch.nodes(), batch.node_vectors):
+      if len(node.children) == 0:
+        terms.append(v)
+      else:
+        nts.append(v)
+
+    # Convert the vocab IDs into dense vectors
+    terms = dy.lookup_batch(self.term_embeddings, terms)
+    nts = dy.lookup_batch(self.nt_embeddings, nts)
+
+    # Gather the vectors back up in their original order
+    term_idx = 0
+    nt_idx = 0
+    node_vectors = []
+    for node, v in zip(batch.nodes(), batch.node_vectors):
+      if len(node.children) == 0:
+        node_vectors.append(dy.pick_batch_elem(terms, term_idx))
+        term_idx += 1
+      else:
+        node_vectors.append(dy.pick_batch_elem(nts, nt_idx))
+        nt_idx += 1
+
+    node_vectors = dy.concatenate_to_batch(node_vectors)
+    return batchers.SyntaxTreeBatch(batch.trees, batch.offsets, node_vectors)
 
 class RnngEmbedder(Embedder, Serializable):
   yaml_tag = '!RnngEmbedder'

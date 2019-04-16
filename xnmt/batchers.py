@@ -84,10 +84,10 @@ class CompoundBatch(Batch):
       return CompoundBatch(sel_batches)
 
 class SyntaxTreeBatch(Batch):
-  def __init__(self, trees, leaves, non_leaves):
+  def __init__(self, trees, offsets, node_vectors):
     self.trees = trees
-    self.leaves = leaves
-    self.non_leaves = non_leaves
+    self.offsets = offsets
+    self.node_vectors = node_vectors
 
   def batch_size(self) -> numbers.Integral:
     return len(self.trees)
@@ -103,6 +103,25 @@ class SyntaxTreeBatch(Batch):
 
   def __str__(self):
     return str(self.trees)
+
+  def nodes(self):
+    for tree in self.trees:
+      for node in iter(tree):
+        yield node
+
+  def sent_offsets(self):
+    if len(self.offsets) == 0:
+      yield (0, 0)
+      return
+
+    for i in range(len(self.offsets) - 1):
+      yield self.offsets[i], self.offsets[i+1]
+
+    try:
+      yield self.offsets[-1], (None for _ in self.offsets[-1])
+    except TypeError:
+      yield (self.offsets[-1], None)
+
 
 class Mask(object):
   """
@@ -819,13 +838,13 @@ class BinarySyntaxTreeBatcher(WordSrcBatcher, Serializable):
     r.mask = mask
     return r
 
-class SyntaxTreeBatcher(WordSrcBatcher, Serializable):
+class SyntaxTreeBatcher(InOrderBatcher, Serializable):
   yaml_tag = '!SyntaxTreeBatcher'
 
   @serializable_init
   def __init__(self,
-               avg_batch_size: numbers.Integral = 1) -> None:
-    super().__init__(avg_batch_size=avg_batch_size, pad_src_to_multiple=1)
+               batch_size: numbers.Integral = 1) -> None:
+    super().__init__(batch_size=batch_size, pad_src_to_multiple=1)
 
   def create_single_batch(self, src_sents, trg_sents, sort_by_trg_len):
     if trg_sents is not None and sort_by_trg_len:
@@ -838,34 +857,12 @@ class SyntaxTreeBatcher(WordSrcBatcher, Serializable):
     else:
       return src_batch
 
-  def _annotate_dtl(self, tree):
-    """Annotate each tree node with its distance to leaf"""
-    for child in tree.children:
-      self._annotate_dtl(child)
-    if len(tree.children) == 0:
-      tree.dtl = 0
-    else:
-      tree.dtl = max([child.dtl for child in tree.children])
-
-  def _annotate_dtr(self, tree, dist_from_root=0):
-    """Annotate each tree node with its distance to root"""
-    tree.dtr = dist_from_root
-    for child in tree.children:
-      self._annotate_dtr(child, dist_from_root + 1)
-
-  def _sep_leaves_nts(self, tree, leaves, non_leaves):
-    """Separates tree nodes into leaves and non_leaves"""
-    tree.parent = len(non_leaves) - 1
-    for child in tree.children:
-      self._sep_leaves_nts(child, leaves, non_leaves)
-    if len(tree.children) == 0:
-      leaves.append(tree.label)
-    else:
-      non_leaves.append(tree.label)
-
   def _make_src_batch(self, src_sents, pad_symbol=0):
-    leaves = []
-    non_leaves = []
+    structures = []
+    offsets = []
+    node_vectors = []
     for src_sent in src_sents:
-      self._sep_leaves_nts(src_sent, leaves, non_leaves)
-    return SyntaxTreeBatch(src_sents, leaves, non_leaves)
+      structures.append(src_sent.structure)
+      node_vectors += src_sent.node_vectors
+      offsets.append(len(node_vectors))
+    return SyntaxTreeBatch(structures, offsets, node_vectors)
