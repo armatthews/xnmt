@@ -355,8 +355,8 @@ class DotAttender(Attender, Serializable):
     self.scale = scale
     self.attention_vecs = []
 
-  def init_sent(self, sent: expression_seqs.ExpressionSequence) -> None:
-    self.curr_sent = sent
+  def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> None:
+    self.curr_sent = encoded
     self.attention_vecs = []
     self.I = dy.transpose(self.curr_sent.as_tensor())
     return None
@@ -398,8 +398,8 @@ class BilinearAttender(Attender, Serializable):
     self.Wa = param_collection.add_parameters((input_dim, state_dim), init=param_init.initializer((input_dim, state_dim)))
     self.curr_sent = None
 
-  def init_sent(self, sent: expression_seqs.ExpressionSequence) -> None:
-    self.curr_sent = sent
+  def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> None:
+    self.curr_sent = encoded
     self.attention_vecs = []
     self.I = self.curr_sent.as_tensor()
     return None
