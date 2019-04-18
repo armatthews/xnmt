@@ -623,7 +623,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         arity = len(node.children)
         topology[node.max_dtl][arity].append((i + offset, child_indices))
 
-    assert batch.node_vectors.dim()[1] == batch.offsets[-1]
+    assert len(batch.node_vectors) == batch.offsets[-1]
     node_vectors = [None for _ in range(batch.offsets[-1])]
 
     # For each level (0 = terminals), and arity
@@ -634,7 +634,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         children = [[] for _ in range(arity)]
         for p, cs in nodes:
           assert len(cs) == arity
-          labels.append(dy.pick_batch_elem(batch.node_vectors, p))
+          labels.append(batch.node_vectors[p])
           for i, c in enumerate(cs):
             assert node_vectors[c] is not None
             children[i].append(node_vectors[c])
@@ -657,8 +657,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
           assert node_vectors[p] is None
           node_vectors[p] = v
 
-    node_vectors = dy.concatenate_to_batch(node_vectors)
-    assert node_vectors.dim()[1] == batch.node_vectors.dim()[1]
+    assert len(node_vectors) == len(batch.node_vectors)
     return batchers.SyntaxTreeBatch(batch.trees, batch.offsets, node_vectors)
 
   def embed_tree_outside(self, batch: batchers.SyntaxTreeBatch, layer_idx):
@@ -670,7 +669,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         parent = node.parent.idx + offset if node.parent is not None else -1
         topology[node.dtr].append((i + offset, parent))
 
-    assert batch.node_vectors.dim()[1] == batch.offsets[-1]
+    assert len(batch.node_vectors) == batch.offsets[-1]
     node_vectors = [None for _ in range(batch.offsets[-1])] 
 
     # For each level (0 = root) create a
@@ -680,7 +679,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
       parents = []
       for idx, parent_idx in level:
         assert (level_idx == 0) == (parent_idx == -1)
-        labels.append(dy.pick_batch_elem(batch.node_vectors, idx))
+        labels.append(batch.node_vectors[idx])
         if level_idx != 0:
           assert node_vectors[parent_idx] is not None
           parents.append(node_vectors[parent_idx])
@@ -704,8 +703,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         assert node_vectors[p] is None
         node_vectors[p] = v
 
-    node_vectors = dy.concatenate_to_batch(node_vectors)
-    assert node_vectors.dim()[1] == batch.node_vectors.dim()[1]
+    assert len(node_vectors) == len(batch.node_vectors)
     return batchers.SyntaxTreeBatch(batch.trees, batch.offsets, node_vectors)
 
   def encode_tree(self, batch: batchers.SyntaxTreeBatch):
@@ -720,7 +718,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
       masks.append([])
       for node in tree.nodes():
         if len(node.children) == 0:
-          v = dy.pick_batch_elem(batch.node_vectors, idx)
+          v = batch.node_vectors[idx]
           term_seqs[-1].append(v)
           masks[-1].append(0)
         idx += 1
@@ -759,9 +757,8 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
           node_vectors.append(term_vectors[i][term_idx])
           term_idx += 1
         else:
-          node_vectors.append(dy.pick_batch_elem(batch.node_vectors, j))
+          node_vectors.append(batch.node_vectors[j])
 
-    node_vectors = dy.concatenate_to_batch(node_vectors)
     r = batchers.SyntaxTreeBatch(batch.trees, batch.offsets, batch.node_vectors)
     return r
 
@@ -769,8 +766,9 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     for batch in batches[1:]:
       assert batch.trees == batches[0].trees
       assert batch.offsets == batches[0].offsets
+      assert len(batch.node_vectors) == len(batches[0].node_vectors)
 
-    node_vectors = dy.esum([batch.node_vectors for batch in batches])
+    node_vectors = [dy.esum([batch.node_vectors[i] for batch in batches]) for i in range(len(batches[0].node_vectors))]
     return batchers.SyntaxTreeBatch(batches[0].trees, batches[0].offsets, node_vectors)
 
   def embed_tree(self, batch: batchers.SyntaxTreeBatch, layer_idx):
@@ -787,7 +785,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     j = 0
     for i, tree in enumerate(batch.trees):
       for node in tree.nodes():
-        vectors[i].append(dy.pick_batch_elem(batch.node_vectors, j))
+        vectors[i].append(batch.node_vectors[j])
         masks[i].append(0)
         j += 1
     assert j == batch.offsets[-1]

@@ -554,7 +554,6 @@ class SyntaxTreeEmbedder(Embedder, Serializable):
         node_vectors.append(dy.pick_batch_elem(nts, nt_idx))
         nt_idx += 1
 
-    node_vectors = dy.concatenate_to_batch(node_vectors)
     return batchers.SyntaxTreeBatch(batch.trees, batch.offsets, node_vectors)
 
 class RnngEmbedder(Embedder, Serializable):
