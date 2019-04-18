@@ -323,13 +323,13 @@ class TreeRNN(transducers.SeqTransducer):
   def compute_gate(self, key, layer_idx, x, children, activation=dy.logistic):
     W = getattr(self, 'W%s' % key)[layer_idx]
     b = getattr(self, 'b%s' % key)[layer_idx]
-    r = W * x + b
 
+    exprs = [b, W, x]
     for i, child in enumerate(children):
       U = getattr(self, 'U%s%d' % (key, i))[layer_idx]
-      r += U * child
+      exprs += [U, child]
 
-    return activation(r)
+    return activation(dy.affine_transform(exprs))
 
   def transduce(self, trees: Union[SyntaxTree, List[SyntaxTree]]) -> expression_seqs.ExpressionSequence:
     if type(trees) != list:
@@ -400,9 +400,13 @@ class TreeLSTM(TreeRNN, Serializable):
     f = [self.compute_gate('f%d' % j, layer_idx, label, child_hs) for j in range(len(children))]
     o = self.compute_gate('o', layer_idx, label, child_hs)
     u = self.compute_gate('u', layer_idx, label, child_hs, activation=dy.tanh)
-    c = dy.cmult(i, u)
+
+    terms = []
+    terms.append(dy.cmult(i, u))
     for j, child in enumerate(children):
-      c += dy.cmult(f[j], child.c)
+      terms.append(dy.cmult(f[j], child.c))
+
+    c = dy.esum(terms)
     h = dy.cmult(o, dy.tanh(c))
     return h, c
 
@@ -441,18 +445,19 @@ class TreeGRU(TreeRNN, Serializable):
     key = 'u'
     W = getattr(self, 'W%s' % key)[layer_idx]
     b = getattr(self, 'b%s' % key)[layer_idx]
-    r = W * x + b
+    exprs = [b, W, x]
 
     for i, (child, ri) in enumerate(zip(children, r)):
       U = getattr(self, 'U%s%d' % (key, i))[layer_idx]
-      r += U * dy.cmult(child.h, ri)
-    return dy.tanh(r)
+      exprs += [U, dy.cmult(child, ri)]
+    return dy.tanh(dy.affine_transform(exprs))
 
   def compute_h(self, u, children, i, f):
-    r = dy.cmult(u, i)
+    terms = []
+    terms.append(dy.cmult(u, i))
     for j, (child, fj) in enumerate(zip(children, f)):
-      r += dy.cmult(child.h, fj)
-    return r
+      terms.append(dy.cmult(child, fj))
+    return dy.esum(terms)
 
   def compute_output(self, layer_idx, label, children):
     child_hs = [child.h for child in children]
@@ -471,7 +476,7 @@ class TreeGRU(TreeRNN, Serializable):
     new_tree.h = h
     return new_tree
 
-class BidirTreeGRU(TreeGRU, Serializable):
+"""class BidirTreeGRU(TreeGRU, Serializable):
   yaml_tag = '!BidirTreeGRU'
 
   @register_xnmt_handler
@@ -554,7 +559,7 @@ class BidirTreeGRU(TreeGRU, Serializable):
   def shared_params(self):
     return [{".term_encoder.input_dim", ".input_dim"},
             {".term_encoder.hidden_dim", ".input_dim"},
-            {".term_encoder.layers", ".layers"}]
+            {".term_encoder.layers", ".layers"}]"""
 
 class BatchedBidirTreeGRU(TreeGRU, Serializable):
   yaml_tag = '!BatchedBidirTreeGRU'
@@ -584,34 +589,6 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     for layer_idx in range(self.layers):
       trees = self.embed_tree(trees, layer_idx)
     return linearize(trees)
-
-  def compute_gate(self, key, layer_idx, x, children, activation=dy.logistic):
-    W = getattr(self, 'W%s' % key)[layer_idx]
-    b = getattr(self, 'b%s' % key)[layer_idx]
-    r = W * x + b
-
-    for i, child in enumerate(children):
-      U = getattr(self, 'U%s%d' % (key, i))[layer_idx]
-      r += U * child
-
-    return activation(r)
-
-  def compute_u(self, layer_idx, x, children, r):
-    key = 'u'
-    W = getattr(self, 'W%s' % key)[layer_idx]
-    b = getattr(self, 'b%s' % key)[layer_idx]
-    r = W * x + b
-
-    for i, (child, ri) in enumerate(zip(children, r)):
-      U = getattr(self, 'U%s%d' % (key, i))[layer_idx]
-      r += U * dy.cmult(child, ri)
-    return dy.tanh(r)
-
-  def compute_h(self, u, children, i, f):
-    r = dy.cmult(u, i)
-    for j, (child, fj) in enumerate(zip(children, f)):
-      r += dy.cmult(child, fj)
-    return r
 
   def embed_tree_inside(self, batch: batchers.SyntaxTreeBatch, layer_idx):
     # Topologically sort the trees in the batch
