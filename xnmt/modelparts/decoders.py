@@ -342,6 +342,37 @@ class RnngDecoder(Decoder, Serializable):
     state = self.state_transform.transform(state_in)
     return state
 
+  def calc_subloss_batch(self, state: dy.Expression, ref_action_type: batchers.ListBatch, ref_action_subtype: batchers.ListBatch):
+    N = len(ref_action_type)
+    used_action_types = set(ref_action_type)
+    sublosses = [None for _ in range(N)]
+    for action_type in used_action_types:
+      states = []
+      subtypes = []
+      indices = []
+      for i in range(N):
+        if ref_action_type[i] == action_type:
+          states.append(dy.pick_batch_elem(state, i))
+          subtypes.append(ref_action_subtype[i])
+          indices.append(i)
+      states = dy.concatenate_to_batch(states)
+      subtypes = batchers.ListBatch(subtypes)
+      if action_type == RnngVocab.SHIFT:
+        subloss = self.term_scorer.calc_loss(states, subtypes)
+      elif ref_action_type == RnngVocab.NT:
+        subloss = self.nt_scorer.calc_loss(states, subtypes)
+      else:
+        subloss = dy.zeros(1, batch_size=len(subtypes))
+
+      assert subloss.dim()[1] == len(indices)
+      for i in range(len(indices)):
+        idx = indices[i]
+        assert sublosses[idx] is None
+        sublosses[idx] = dy.pick_batch_elem(subloss, i)
+
+    assert None not in sublosses
+    return dy.concatenate_to_batch(sublosses)
+
   def calc_loss(self, dec_state : RnngDecoderState, ref_action : RnngAction):
     assert dec_state.context != None
     assert type(ref_action) == batchers.ListBatch
@@ -361,15 +392,7 @@ class RnngDecoder(Decoder, Serializable):
     if not batched:
       loss += self.calc_subloss(state, ref_action_type, ref_action_subtype)
     else:
-      batch_size = state.dim()[1]
-      sublosses = []
-      for i in range(batch_size):
-        state_i = dy.pick_batch_elem(state, i)
-        subloss = self.calc_subloss(state_i, ref_action_type[i], ref_action_subtype[i])
-        sublosses.append(subloss)
-      sublosses = dy.concatenate_to_batch(sublosses)
-      assert loss.dim() == sublosses.dim()
-      loss += sublosses
+      loss += self.calc_subloss_batch(state, ref_action_type, ref_action_subtype)
     return loss
 
   def calc_subloss(self, state, ref_action_type, ref_action_subtype):
