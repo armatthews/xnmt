@@ -258,6 +258,7 @@ class UniGRUSeqTransducer(transducers.SeqTransducer, Serializable):
                layers: numbers.Integral = 1,
                input_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                hidden_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               dropout: numbers.Real = Ref("exp_global.dropout", default=0.0),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))):
     self.num_layers = layers
@@ -269,6 +270,10 @@ class UniGRUSeqTransducer(transducers.SeqTransducer, Serializable):
       param_init = [param_init] * layers
     if not isinstance(bias_init, collections.abc.Sequence):
         bias_init = [bias_init] * layers
+
+    self.dropout_rate = dropout
+    self.dropout_mask_x = None
+    self.dropout_mask_h = None
 
     self.Wz = []
     self.Wr = []
@@ -300,6 +305,8 @@ class UniGRUSeqTransducer(transducers.SeqTransducer, Serializable):
   @handle_xnmt_event
   def on_start_sent(self, src):
     self._final_states = None
+    self.dropout_mask_x = None
+    self.dropout_mask_h = None
 
   def get_final_states(self) -> List[transducers.FinalTransducerState]:
     return self._final_states
@@ -310,6 +317,19 @@ class UniGRUSeqTransducer(transducers.SeqTransducer, Serializable):
   def set_dropout(self, dropout: numbers.Real) -> None:
     self.dropout_rate = dropout
 
+  def set_dropout_masks(self, batch_size: numbers.Integral = 1) -> None:
+    if self.dropout_rate > 0.0 and self.train:
+      retention_rate = 1.0 - self.dropout_rate
+      scale = 1.0 / retention_rate
+      self.dropout_mask_x = []
+      self.dropout_mask_h = []
+      for layer_idx in range(self.num_layers):
+        input_dim = self.input_dim if layer_idx == 0 else self.hidden_dim
+        mask_x = dy.random_bernoulli((input_dim,), retention_rate, scale, batch_size=batch_size)
+        mask_h = dy.random_bernoulli((self.hidden_dim,), retention_rate, scale, batch_size=batch_size)
+        self.dropout_mask_x.append(mask_x)
+        self.dropout_mask_h.append(mask_h)
+
   def add_input_to_prev(self, prev_state: dy.Expression, x: Union[dy.Expression, Sequence[dy.Expression]]) \
           -> Sequence[dy.Expression]:
     if isinstance(x, dy.Expression):
@@ -317,10 +337,16 @@ class UniGRUSeqTransducer(transducers.SeqTransducer, Serializable):
     elif type(x) != list:
       x = list(x)
 
+    if self.dropout_rate > 0.0 and self.train and self.dropout_mask_x is None:
+      self.set_dropout_masks()
+
     h = prev_state
     for layer_i in range(self.num_layers):
       new_xs = []
       for xi in x:
+        if self.dropout_rate > 0.0 and self.train:
+          xi = dy.cmult(xi, self.dropout_mask_x[layer_i])
+          h = dy.cmult(h, self.dropout_mask_h[layer_i])
         z = dy.logistic(dy.affine_transform([self.bz[layer_i], self.Wz[layer_i], xi, self.Uz[layer_i], h]))
         r = dy.logistic(dy.affine_transform([self.br[layer_i], self.Wr[layer_i], xi, self.Ur[layer_i], h]))
         u = dy.tanh(dy.affine_transform([self.bu[layer_i], self.Wu[layer_i], xi, self.Uu[layer_i], h]))
