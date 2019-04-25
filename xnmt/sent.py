@@ -320,11 +320,11 @@ class SyntaxTreeNode:
       for node in iter(child):
         yield node
 
-class SyntaxTree(Sentence):
+class SyntaxTree(ReadableSentence):
   def __init__(self, structure, node_vectors, idx=None):
+    super().__init__(idx=idx)
     self.structure = structure
     self.node_vectors = node_vectors
-    self.idx = idx
 
   def __repr__(self):
     return repr(self.structure)
@@ -392,10 +392,10 @@ class SyntaxTree(Sentence):
         i = next_paren
 
     structure.annotate()
-    return SyntaxTree(structure, node_vectors)
+    return SyntaxTree(structure, node_vectors, idx)
 
   def str_tokens(self, exclude_ss_es=True, exclude_unk=False, exclude_padded=True, **kwargs) -> List[str]:
-    pass
+    return [node.label for node in self.structure]
 
   def sent_len(self) -> int:
     return len(list(self.nodes()))
