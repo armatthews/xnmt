@@ -386,10 +386,12 @@ class SyntaxTree(ReadableSentence):
       else:
         # terminal
         next_paren = line.find(')', i + 1)
-        term = line[i : next_paren]
+        next_space = line.find(' ', i + 1)
+        end = min(next_paren, next_space) if next_space >= 0 else next_paren
+        term = line[i : end]
         node_vectors.append(term_vocab.convert(term))
         curr_node.children.append(SyntaxTreeNode(term, curr_node))
-        i = next_paren
+        i = end
 
     structure.annotate()
     return SyntaxTree(structure, node_vectors, idx)
