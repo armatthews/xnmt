@@ -120,6 +120,102 @@ class MlpAttender(Attender, Serializable):
     self.attention_vecs.append(normalized)
     return normalized
 
+class CoverageGRU(Serializable):
+  """A specialization of UniGRUSeqTransducer used by Coverage Attenders.
+  A coverage attender updates its attention state by using a GRU with three
+  inputs: the current decoder state, the most recent attention weight, and
+  a source word vector.
+  Logically these three inputs are concatenated and fed into the GRU once
+  per source word at each time step. This class saves some time and RAM
+  by pre-computing weights * decoder state once per time step and
+  weights * source word vectors once per sentence.
+
+  For now this class only supports one-layer GRUs."""
+
+  yaml_tag = '!CoverageGRU'
+
+  @events.register_xnmt_handler
+  @serializable_init
+  def __init__(self,
+               src_vec_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               dec_state_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               coverage_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               dropout: numbers.Real = Ref("exp_global.dropout", default=0.0),
+               param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
+               bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))):
+    self.src_vec_dim = src_vec_dim
+    self.dec_state_dim = dec_state_dim
+    self.coverage_dim = coverage_dim
+    self.dropout_rate = dropout
+
+    self.dropout_mask = None
+    self.create_parameters(param_init, bias_init)
+
+  def create_parameters(self, param_init, bias_init):
+    ws_dim = (self.coverage_dim, self.src_vec_dim)
+    wd_dim = (self.coverage_dim, self.dec_state_dim)
+    wa_dim = (self.coverage_dim, 1)
+    u_dim = (self.coverage_dim, self.coverage_dim)
+    b_dim = (self.coverage_dim,)
+
+    model = param_collections.ParamManager.my_params(self)
+    self.Wsz = model.add_parameters(dim=ws_dim, init=param_init.initializer(ws_dim))
+    self.Wdz = model.add_parameters(dim=wd_dim, init=param_init.initializer(wd_dim))
+    self.Waz = model.add_parameters(dim=wa_dim, init=param_init.initializer(wa_dim))
+    self.Wsr = model.add_parameters(dim=ws_dim, init=param_init.initializer(ws_dim))
+    self.Wdr = model.add_parameters(dim=wd_dim, init=param_init.initializer(wd_dim))
+    self.War = model.add_parameters(dim=wa_dim, init=param_init.initializer(wa_dim))
+    self.Wsu = model.add_parameters(dim=ws_dim, init=param_init.initializer(ws_dim))
+    self.Wdu = model.add_parameters(dim=wd_dim, init=param_init.initializer(wd_dim))
+    self.Wau = model.add_parameters(dim=wa_dim, init=param_init.initializer(wa_dim))
+    self.Uz = model.add_parameters(dim=u_dim, init=param_init.initializer(u_dim))
+    self.Ur = model.add_parameters(dim=u_dim, init=param_init.initializer(u_dim))
+    self.Uu = model.add_parameters(dim=u_dim, init=param_init.initializer(u_dim))
+    self.bz = model.add_parameters(dim=b_dim, init=bias_init.initializer(b_dim))
+    self.br = model.add_parameters(dim=b_dim, init=bias_init.initializer(b_dim))
+    self.bu = model.add_parameters(dim=b_dim, init=bias_init.initializer(b_dim))
+
+  @events.handle_xnmt_event
+  def on_set_train(self, val):
+    self.train = val
+
+  def initial_state(self) -> dy.Expression:
+    return dy.zeros((self.coverage_dim))
+
+  def set_dropout(self, dropout: numbers.Real) -> None:
+    self.dropout_rate = dropout
+
+  def set_dropout_masks(self, batch_size: numbers.Integral = 1) -> None:
+    # Note: no need for a dropout mask for the input, since it's assumed
+    # to be a one-dimensional attention value.
+    if self.dropout_rate > 0.0 and self.train:
+      retention_rate = 1.0 - self.dropout_rate
+      scale = 1.0 / retention_rate
+      self.dropout_mask = dy.random_bernoulli((self.converage_dim,), retention_rate, scale, batch_size=batch_size)
+
+  def init_sent(self, src_embs: expression_seqs.ExpressionSequence) -> dy.Expression:
+    # Precompute W * src_embs once here
+    I = src_embs.as_tensor()
+    self.Iz = safe_affine_transform([self.bz, self.Wsz, I])
+    self.Ir = safe_affine_transform([self.br, self.Wsr, I])
+    self.Iu = safe_affine_transform([self.bu, self.Wsu, I])
+    self.dropout_mask = None
+
+    sent_len = I.dim()[0][1]
+    batch_size = I.dim()[1]
+    return dy.zeros((self.coverage_dim, sent_len), batch_size=batch_size)
+
+  def add_input_to_prev(self, prev_coverage: dy.Expression, dec_state: dy.Expression, attention: dy.Expression):
+    iz = safe_affine_transform([self.Iz, self.Waz, dy.transpose(attention), self.Uz, prev_coverage])
+    ir = safe_affine_transform([self.Ir, self.War, dy.transpose(attention), self.Ur, prev_coverage])
+    iu = safe_affine_transform([self.Iu, self.Wau, dy.transpose(attention), self.Uu, prev_coverage])
+
+    z = dy.logistic(iz)
+    r = dy.logistic(ir)
+    u = dy.tanh(iu)
+    h = dy.cmult(1 - z, prev_coverage) + dy.cmult(z, u)
+    return h
+
 class CoverageAttender(Attender, Serializable):
   """
   Implements the attention model of Tu et. al (2016)
@@ -142,7 +238,7 @@ class CoverageAttender(Attender, Serializable):
                state_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                hidden_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                coverage_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
-               coverage_updater = None,
+               coverage_rnn = bare(CoverageGRU),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer)),
                truncate_dec_batches: bool = Ref("exp_global.truncate_dec_batches", default=False)) -> None:
@@ -150,7 +246,9 @@ class CoverageAttender(Attender, Serializable):
     self.state_dim = state_dim
     self.hidden_dim = hidden_dim
     self.coverage_dim = coverage_dim
+    self.coverage_rnn = coverage_rnn
     self.truncate_dec_batches = truncate_dec_batches
+
     param_collection = param_collections.ParamManager.my_params(self)
     self.W = param_collection.add_parameters((hidden_dim, input_dim), init=param_init.initializer((hidden_dim, input_dim)))
     self.V = param_collection.add_parameters((hidden_dim, state_dim), init=param_init.initializer((hidden_dim, state_dim)))
@@ -159,28 +257,13 @@ class CoverageAttender(Attender, Serializable):
     self.v = param_collection.add_parameters((1, hidden_dim), init=param_init.initializer((1, hidden_dim)))
     self.curr_sent = None
 
-    self.coverage_updater = self.add_serializable_component(
-        "coverage_updater",
-        coverage_updater,
-        lambda: recurrent.UniGRUSeqTransducer(
-            input_dim=self.get_input_dim(),
-            hidden_dim=self.coverage_dim,
-            param_init=param_init,
-            bias_init=bias_init))
-
-  def get_input_dim(self):
-    return self.state_dim + self.hidden_dim + 1
-
-  def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> None:
+  def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> AttenderState:
     self.attention_vecs = []
     self.curr_sent = encoded
     I = self.curr_sent.as_tensor()
     self.I = I
     self.WI = safe_affine_transform([self.b, self.W, I])
-    batch_size = sent.batch_size() if batchers.is_batched(sent) else sent.dim()[1]
-    sent_len = I.dim()[0][1]
-    r = dy.zeros((self.coverage_dim, sent_len), batch_size=batch_size)
-    return r
+    return self.coverage_rnn.init_sent(encoded)
 
   def calc_attention(self, dec_state: dy.Expression, att_state: AttenderState = None) -> dy.Expression:
     assert att_state is not None
@@ -204,11 +287,12 @@ class CoverageAttender(Attender, Serializable):
     return normalized
 
   def update(self, dec_state, att_state: AttenderState, attention: dy.Expression):
-    dec_state_b = dy.concatenate_cols([dec_state for _ in range(self.I.dim()[0][1])])
-    h_in = dy.concatenate([self.I, dy.transpose(attention), dec_state_b])
-    h_out = self.coverage_updater.add_input_to_prev(att_state, h_in)[0]
-    assert h_out.dim() == att_state.dim()
-    return h_out
+    return self.coverage_rnn.add_input_to_prev(att_state, dec_state, attention)
+
+  def shared_params(self):
+    return [{".coverage_rnn.src_vec_dim", ".input_dim"},
+            {".coverage_rnn.dec_state_dim", ".state_dim"},
+            {".coverage_rnn.coverage_dim", ".coverage_dim"}]
 
 class SyntaxCoverageAttender(CoverageAttender, Serializable):
   """
