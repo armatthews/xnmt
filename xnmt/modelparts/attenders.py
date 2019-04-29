@@ -140,12 +140,14 @@ class CoverageGRU(Serializable):
                src_vec_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                dec_state_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                coverage_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
+               other_dim: numbers.Integral = 1,
                dropout: numbers.Real = Ref("exp_global.dropout", default=0.0),
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))):
     self.src_vec_dim = src_vec_dim
     self.dec_state_dim = dec_state_dim
     self.coverage_dim = coverage_dim
+    self.other_dim = other_dim
     self.dropout_rate = dropout
 
     self.dropout_mask = None
@@ -154,7 +156,7 @@ class CoverageGRU(Serializable):
   def create_parameters(self, param_init, bias_init):
     ws_dim = (self.coverage_dim, self.src_vec_dim)
     wd_dim = (self.coverage_dim, self.dec_state_dim)
-    wa_dim = (self.coverage_dim, 1)
+    wa_dim = (self.coverage_dim, self.other_dim)
     u_dim = (self.coverage_dim, self.coverage_dim)
     b_dim = (self.coverage_dim,)
 
@@ -206,12 +208,16 @@ class CoverageGRU(Serializable):
     return dy.zeros((self.coverage_dim, sent_len), batch_size=batch_size)
 
   def add_input_to_prev(self, prev_coverage: dy.Expression, dec_state: dy.Expression, attention: dy.Expression):
-    iz = safe_affine_transform([self.Iz, self.Waz, dy.transpose(attention), self.Uz, prev_coverage])
-    ir = safe_affine_transform([self.Ir, self.War, dy.transpose(attention), self.Ur, prev_coverage])
-    iu = safe_affine_transform([self.Iu, self.Wau, dy.transpose(attention), self.Uu, prev_coverage])
+    bz = dy.colwise_add(self.Iz, self.Wdz * dec_state)
+    br = dy.colwise_add(self.Ir, self.Wdr * dec_state)
+    bu = dy.colwise_add(self.Iu, self.Wdu * dec_state)
+
+    iz = safe_affine_transform([bz, self.Waz, dy.transpose(attention), self.Uz, prev_coverage])
+    ir = safe_affine_transform([br, self.War, dy.transpose(attention), self.Ur, prev_coverage])
 
     z = dy.logistic(iz)
     r = dy.logistic(ir)
+    iu = safe_affine_transform([bu, self.Wau, dy.transpose(attention), self.Uu, dy.cmult(r, prev_coverage)])
     u = dy.tanh(iu)
     h = dy.cmult(1 - z, prev_coverage) + dy.cmult(z, u)
     return h
@@ -238,7 +244,7 @@ class CoverageAttender(Attender, Serializable):
                state_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                hidden_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                coverage_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
-               coverage_rnn = bare(CoverageGRU),
+               coverage_rnn = None,
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer)),
                truncate_dec_batches: bool = Ref("exp_global.truncate_dec_batches", default=False)) -> None:
@@ -246,7 +252,6 @@ class CoverageAttender(Attender, Serializable):
     self.state_dim = state_dim
     self.hidden_dim = hidden_dim
     self.coverage_dim = coverage_dim
-    self.coverage_rnn = coverage_rnn
     self.truncate_dec_batches = truncate_dec_batches
 
     param_collection = param_collections.ParamManager.my_params(self)
@@ -256,6 +261,23 @@ class CoverageAttender(Attender, Serializable):
     self.U = param_collection.add_parameters((hidden_dim, coverage_dim), init=param_init.initializer((hidden_dim, coverage_dim)))
     self.v = param_collection.add_parameters((1, hidden_dim), init=param_init.initializer((1, hidden_dim)))
     self.curr_sent = None
+
+    self.coverage_rnn = self.add_serializable_component(
+        "coverage_rnn",
+        coverage_rnn,
+        lambda: CoverageGRU(
+            src_vec_dim=self.input_dim,
+            dec_state_dim=self.state_dim,
+            coverage_dim=self.coverage_dim,
+            other_dim=self.get_input_dim(),
+            param_init=param_init,
+            bias_init=bias_init))
+
+  def get_input_dim(self):
+    """Returns the input size to the RNN, not counting the source word vectors
+    or decoder state. For a normal coverage attender this is just 1: the attention value
+    from the previous time step."""
+    return 1
 
   def init_sent(self, encoded: expression_seqs.ExpressionSequence, sent) -> AttenderState:
     self.attention_vecs = []
@@ -316,14 +338,18 @@ class SyntaxCoverageAttender(CoverageAttender, Serializable):
                state_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                hidden_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
                coverage_dim: numbers.Integral = Ref("exp_global.default_layer_dim"),
-               coverage_updater = None,
+               coverage_rnn = None,
                param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
                bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer)),
                truncate_dec_batches: bool = Ref("exp_global.truncate_dec_batches", default=False)) -> None:
-    super().__init__(input_dim, state_dim, hidden_dim, coverage_dim, coverage_updater, param_init, bias_init, truncate_dec_batches)
+    super().__init__(input_dim, state_dim, hidden_dim, coverage_dim, coverage_rnn, param_init, bias_init, truncate_dec_batches)
 
   def get_input_dim(self):
-    return self.hidden_dim + self.state_dim + 1 + 2 * (self.coverage_dim + 1)
+    """For a syntax coverage attender the input is:
+    - The attention value of the previous time step
+    - The attention values of this node's two children
+    - The coverage vectors of this node's two children"""
+    return 1 + 2 * (self.coverage_dim + 1)
 
   def build_child_map(self, tree, child_idx):
     child_map = []
@@ -407,14 +433,12 @@ class SyntaxCoverageAttender(CoverageAttender, Serializable):
     return selected
 
   def update(self, dec_state, att_state: AttenderState, attention: dy.Expression):
-    dec_state_b = dy.concatenate_cols([dec_state for _ in range(self.I.dim()[0][1])])
-
     state = dy.concatenate([att_state, dy.transpose(attention)])
     left_state = self.select_from_state(state, self.left_child_map, dy.transpose(self.left_mask))
     right_state = self.select_from_state(state, self.right_child_map, dy.transpose(self.right_mask))
 
-    h_in = dy.concatenate([self.I, dy.transpose(attention), dec_state_b, left_state, right_state])
-    h_out = self.coverage_updater.add_input_to_prev(att_state, h_in)[0]
+    h_in = dy.concatenate_cols([attention, dy.transpose(left_state), dy.transpose(right_state)])
+    h_out = self.coverage_rnn.add_input_to_prev(att_state, dec_state, h_in)
     assert h_out.dim() == att_state.dim()
     return h_out
 
