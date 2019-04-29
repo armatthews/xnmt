@@ -349,7 +349,7 @@ class UniGRUSeqTransducer(transducers.SeqTransducer, Serializable):
           h = dy.cmult(h, self.dropout_mask_h[layer_i])
         z = dy.logistic(dy.affine_transform([self.bz[layer_i], self.Wz[layer_i], xi, self.Uz[layer_i], h]))
         r = dy.logistic(dy.affine_transform([self.br[layer_i], self.Wr[layer_i], xi, self.Ur[layer_i], h]))
-        u = dy.tanh(dy.affine_transform([self.bu[layer_i], self.Wu[layer_i], xi, self.Uu[layer_i], h]))
+        u = dy.tanh(dy.affine_transform([self.bu[layer_i], self.Wu[layer_i], xi, self.Uu[layer_i], dy.cmult(h, r)]))
         h = dy.cmult(1 - z, h) + dy.cmult(z, u)
         new_xs.append(h)
       assert len(new_xs) == len(x)
