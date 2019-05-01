@@ -451,8 +451,8 @@ class RnngDecoder(Decoder, Serializable):
     new_state.stack[-1].children.append(word_emb)
     new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, word_emb)
 
+    new_state.terminals.append(word_id)
     if self.use_term_lstm:
-      new_state.terminals.append(word_id)
       new_state.term_lstm_state = self.term_lstm_push(dec_state.term_lstm_state, word_emb)
 
     if self.use_action_lstm:
@@ -528,7 +528,11 @@ class RnngDecoder(Decoder, Serializable):
       assert type(dec_state) != RnngDecoderStateBatch
 
     if dec_state.is_forbidden(word):
-      for s in dec_state:
+      if type(dec_state) == RnngDecoderStateBatch:
+        for s in dec_state:
+          print('stack: %d, terms: %d' % (len(s.stack), len(s.terminals)))
+      else:
+        s = dec_state
         print('stack: %d, terms: %d' % (len(s.stack), len(s.terminals)))
       print('%s is forbidden in dec_state above.' % (self.vocab[word]))
       print(dec_state.is_forbidden(word))
