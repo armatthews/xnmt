@@ -466,7 +466,7 @@ class RnngDecoder(Decoder, Serializable):
       new_state.action_lstm_state = self.action_lstm_push(dec_state.action_lstm_state, word_emb)
 
     if self.binary:
-      while len(self.stack) > 0 and len(self.stack[-1].children) >= 2:
+      while len(new_state.stack) > 0 and len(new_state.stack[-1].children) >= 2:
         new_state = self.perform_reduce(new_state)
 
     return new_state
@@ -499,7 +499,7 @@ class RnngDecoder(Decoder, Serializable):
     assert not dec_state.is_forbidden(action)
     assert len(dec_state.stack) > 0
     if self.binary:
-      assert len(self.stack[-1].children) == 2
+      assert len(dec_state.stack[-1].children) == 2
 
     new_state = dec_state.copy()
     nt_id, children, prev_state = new_state.stack.pop()
@@ -527,7 +527,7 @@ class RnngDecoder(Decoder, Serializable):
       assert word.batch_size() == dec_state.context.dim()[1]
 
     if self.binary:
-      if batcher.is_batched(word):
+      if batchers.is_batched(word):
         for w in word:
           assert w.action != RnngVocab.REDUCE
       else:
@@ -600,9 +600,10 @@ class RnngDecoder(Decoder, Serializable):
       total_score = nt_score + score
       if not dec_state.is_forbidden(action):
         heapq.heappush(best_actions, (-total_score, action))
-    action = RnngAction(RnngVocab.REDUCE, None)
-    total_score = reduce_score
-    heapq.heappush(best_actions, (-total_score, action))
+    if not self.binary:
+      action = RnngAction(RnngVocab.REDUCE, None)
+      total_score = reduce_score
+      heapq.heappush(best_actions, (-total_score, action))
 
     r_actions = []
     r_scores = []
