@@ -298,7 +298,8 @@ class RnngDecoder(Decoder, Serializable):
                state_transform=bare(transforms.AuxNonLinear),
                word_emb_transform=bare(transforms.Linear, bias=False),
                use_term_lstm=False,
-               use_action_lstm=False):
+               use_action_lstm=False,
+               binary=False):
 
     #model = param_collections.ParamManager.my_params(self)
     self.input_dim = input_dim
@@ -313,6 +314,7 @@ class RnngDecoder(Decoder, Serializable):
 
     self.use_term_lstm = use_term_lstm
     self.use_action_lstm = use_action_lstm
+    self.binary = binary
 
     # LSTMs
     if use_term_lstm:
@@ -462,6 +464,11 @@ class RnngDecoder(Decoder, Serializable):
     if self.use_action_lstm:
       new_state.actions.append(RnngAction(RnngVocab.SHIFT, word_id))
       new_state.action_lstm_state = self.action_lstm_push(dec_state.action_lstm_state, word_emb)
+
+    if self.binary:
+      while len(self.stack) > 0 and len(self.stack[-1].children) >= 2:
+        new_state = self.perform_reduce(new_state)
+
     return new_state
 
   def perform_nt(self, dec_state, nt_id):
@@ -491,6 +498,8 @@ class RnngDecoder(Decoder, Serializable):
     action = RnngAction(RnngVocab.REDUCE, None)
     assert not dec_state.is_forbidden(action)
     assert len(dec_state.stack) > 0
+    if self.binary:
+      assert len(self.stack[-1].children) == 2
 
     new_state = dec_state.copy()
     nt_id, children, prev_state = new_state.stack.pop()
@@ -516,6 +525,13 @@ class RnngDecoder(Decoder, Serializable):
       assert dec_state.as_vector().dim()[1] == dec_state.context.dim()[1]
       assert word.batch_size() == dec_state.as_vector().dim()[1]
       assert word.batch_size() == dec_state.context.dim()[1]
+
+    if self.binary:
+      if batcher.is_batched(word):
+        for w in word:
+          assert w.action != RnngVocab.REDUCE
+      else:
+        assert word.action != RnngVocab.REDUCE
 
     if batchers.is_batched(word):
       new_states = []
@@ -612,7 +628,7 @@ class RnngDecoder(Decoder, Serializable):
             {".input_dim", ".state_transform.aux_input_dim"},
             {".hidden_dim", ".state_transform.output_dim"},
             {".hidden_dim", ".compose_transform.input_dim"},
-            {".hidden_dim", ".compose_transform.output_dim"}]
+            {".hidden_dim", ".compose_transform.output_dim"}] 
 
 # TODO: This should be factored to simply use Softmax
 # class AutoRegressiveLexiconDecoder(AutoRegressiveDecoder, Serializable):
