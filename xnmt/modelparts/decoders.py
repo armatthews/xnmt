@@ -289,8 +289,8 @@ class RnngDecoder(Decoder, Serializable):
                nt_scorer = bare(scorers.Softmax),
                bridge: bridges.Bridge = bare(bridges.CopyBridge),
                vocab=None,
-               term_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
-               action_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
+               term_lstm=None,
+               action_lstm=None,
                stack_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                comp_lstm_fwd=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                comp_lstm_rev=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
@@ -315,8 +315,12 @@ class RnngDecoder(Decoder, Serializable):
     self.use_action_lstm = use_action_lstm
 
     # LSTMs
-    self.term_lstm = term_lstm if use_term_lstm else None
-    self.action_lstm = action_lstm if use_action_lstm else None
+    if use_term_lstm:
+      self.term_lstm = self.add_serializable_component("term_lstm", term_lstm,
+                                                       lambda: recurrent.UniLSTMSeqTransducer(decoder_input_feeding=False))
+    if use_action_lstm:
+      self.action_lstm = self.add_serializable_component("action_lstm", action_lstm,
+                                                         lambda: recurrent.UniLSTMSeqTransducer(decoder_input_feeding=False))
     self.stack_lstm = stack_lstm
     self.comp_lstm_fwd = comp_lstm_fwd
     self.comp_lstm_rev = comp_lstm_rev
@@ -575,7 +579,7 @@ class RnngDecoder(Decoder, Serializable):
       if not dec_state.is_forbidden(action):
         heapq.heappush(best_actions, (-total_score, action))
     for nt, score in zip(*best_nts):
-      assert nt < len(self.vocab.nt_vocab)
+      assert nt < len(self.vocab.nt_vocab), 'Attempt to get element %d from NT vocab of size %d' % (nt, len(self.vocab.nt_vocab))
       action = RnngAction(RnngVocab.NT, nt)
       total_score = nt_score + score
       if not dec_state.is_forbidden(action):
