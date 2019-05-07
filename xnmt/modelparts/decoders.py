@@ -319,10 +319,10 @@ class RnngDecoder(Decoder, Serializable):
     # LSTMs
     if use_term_lstm:
       self.term_lstm = self.add_serializable_component("term_lstm", term_lstm,
-                                                       lambda: recurrent.UniLSTMSeqTransducer(decoder_input_feeding=False))
+                                                       lambda: recurrent.UniLSTMSeqTransducer(input_dim=self.input_dim, hidden_dim=self.hidden_dim, decoder_input_feeding=False))
     if use_action_lstm:
       self.action_lstm = self.add_serializable_component("action_lstm", action_lstm,
-                                                         lambda: recurrent.UniLSTMSeqTransducer(decoder_input_feeding=False))
+                                                         lambda: recurrent.UniLSTMSeqTransducer(input_dim=self.input_dim, hidden_dim=self.hidden_dim, decoder_input_feeding=False))
     self.stack_lstm = stack_lstm
     self.comp_lstm_fwd = comp_lstm_fwd
     self.comp_lstm_rev = comp_lstm_rev
@@ -399,6 +399,11 @@ class RnngDecoder(Decoder, Serializable):
       loss += self.calc_subloss(state, ref_action_type, ref_action_subtype)
     else:
       loss += self.calc_subloss_batch(state, ref_action_type, ref_action_subtype)
+
+    if batched:
+      mask = dy.concatenate_to_batch([dy.scalarInput(1 if r != RnngVocab.NONE else 0) for r in ref_action_type])
+      loss = dy.cmult(loss, mask)
+
     return loss
 
   def calc_subloss(self, state, ref_action_type, ref_action_subtype):
@@ -499,7 +504,7 @@ class RnngDecoder(Decoder, Serializable):
     assert not dec_state.is_forbidden(action)
     assert len(dec_state.stack) > 0
     if self.binary:
-      assert len(dec_state.stack[-1].children) == 2
+      assert len(dec_state.stack[-1].children) == 2 or len(dec_state.terminals) == 1
 
     new_state = dec_state.copy()
     nt_id, children, prev_state = new_state.stack.pop()
@@ -528,10 +533,10 @@ class RnngDecoder(Decoder, Serializable):
 
     if self.binary:
       if batchers.is_batched(word):
-        for w in word:
-          assert w.action != RnngVocab.REDUCE
+        for i, w in enumerate(word):
+          assert w.action != RnngVocab.REDUCE or len(dec_state[i].terminals) == 1
       else:
-        assert word.action != RnngVocab.REDUCE
+        assert word.action != RnngVocab.REDUCE or len(dec_state.terminals) == 1
 
     if batchers.is_batched(word):
       new_states = []
@@ -588,22 +593,28 @@ class RnngDecoder(Decoder, Serializable):
     reduce_score = action_log_probs[RnngVocab.REDUCE]
 
     best_actions = []
+    # Add best SHIFT actions
     for term, score in zip(*best_terms):
       assert term < len(self.vocab.term_vocab)
       action = RnngAction(RnngVocab.SHIFT, term)
       total_score = shift_score + score
       if not dec_state.is_forbidden(action):
         heapq.heappush(best_actions, (-total_score, action))
+
+    # Add best NT actions
     for nt, score in zip(*best_nts):
       assert nt < len(self.vocab.nt_vocab), 'Attempt to get element %d from NT vocab of size %d' % (nt, len(self.vocab.nt_vocab))
       action = RnngAction(RnngVocab.NT, nt)
       total_score = nt_score + score
       if not dec_state.is_forbidden(action):
         heapq.heappush(best_actions, (-total_score, action))
-    if not self.binary:
+
+    # Add REDUCE action
+    if True:
       action = RnngAction(RnngVocab.REDUCE, None)
       total_score = reduce_score
-      heapq.heappush(best_actions, (-total_score, action))
+      if not dec_state.is_forbidden(action):
+        heapq.heappush(best_actions, (-total_score, action))
 
     r_actions = []
     r_scores = []
