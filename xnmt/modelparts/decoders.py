@@ -365,7 +365,7 @@ class RnngDecoder(Decoder, Serializable):
       subtypes = batchers.ListBatch(subtypes)
       if action_type == RnngVocab.SHIFT:
         subloss = self.term_scorer.calc_loss(states, subtypes)
-      elif ref_action_type == RnngVocab.NT:
+      elif action_type == RnngVocab.NT:
         subloss = self.nt_scorer.calc_loss(states, subtypes)
       else:
         subloss = dy.zeros(1, batch_size=len(subtypes))
