@@ -365,7 +365,7 @@ class RnngDecoder(Decoder, Serializable):
       subtypes = batchers.ListBatch(subtypes)
       if action_type == RnngVocab.SHIFT:
         subloss = self.term_scorer.calc_loss(states, subtypes)
-      elif ref_action_type == RnngVocab.NT:
+      elif action_type == RnngVocab.NT:
         subloss = self.nt_scorer.calc_loss(states, subtypes)
       else:
         subloss = dy.zeros(1, batch_size=len(subtypes))
@@ -396,9 +396,11 @@ class RnngDecoder(Decoder, Serializable):
     action_loss = self.action_scorer.calc_loss(state, ref_action_type)
     loss = action_loss
     if not batched:
-      loss += self.calc_subloss(state, ref_action_type, ref_action_subtype)
+      subloss = self.calc_subloss(state, ref_action_type, ref_action_subtype)
     else:
-      loss += self.calc_subloss_batch(state, ref_action_type, ref_action_subtype)
+      subloss = self.calc_subloss_batch(state, ref_action_type, ref_action_subtype)
+
+    loss = action_loss + subloss
 
     if batched:
       mask = dy.concatenate_to_batch([dy.scalarInput(1 if r != RnngVocab.NONE else 0) for r in ref_action_type])
@@ -503,8 +505,6 @@ class RnngDecoder(Decoder, Serializable):
     action = RnngAction(RnngVocab.REDUCE, None)
     assert not dec_state.is_forbidden(action)
     assert len(dec_state.stack) > 0
-    if self.binary:
-      assert len(dec_state.stack[-1].children) == 2 or len(dec_state.terminals) == 1
 
     new_state = dec_state.copy()
     nt_id, children, prev_state = new_state.stack.pop()
@@ -530,13 +530,6 @@ class RnngDecoder(Decoder, Serializable):
       assert dec_state.as_vector().dim()[1] == dec_state.context.dim()[1]
       assert word.batch_size() == dec_state.as_vector().dim()[1]
       assert word.batch_size() == dec_state.context.dim()[1]
-
-    if self.binary:
-      if batchers.is_batched(word):
-        for i, w in enumerate(word):
-          assert w.action != RnngVocab.REDUCE or len(dec_state[i].terminals) == 1
-      else:
-        assert word.action != RnngVocab.REDUCE or len(dec_state.terminals) == 1
 
     if batchers.is_batched(word):
       new_states = []
@@ -640,7 +633,9 @@ class RnngDecoder(Decoder, Serializable):
             {".input_dim", ".state_transform.aux_input_dim"},
             {".hidden_dim", ".state_transform.output_dim"},
             {".hidden_dim", ".compose_transform.input_dim"},
-            {".hidden_dim", ".compose_transform.output_dim"}] 
+            {".hidden_dim", ".compose_transform.output_dim"},
+            {".hidden_dim", ".nt_scorer.input_dim"},
+            {".hidden_dim", ".term_scorer.input_dim"}]
 
 # TODO: This should be factored to simply use Softmax
 # class AutoRegressiveLexiconDecoder(AutoRegressiveDecoder, Serializable):
