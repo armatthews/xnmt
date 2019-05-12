@@ -4,6 +4,7 @@ import numbers
 import heapq
 
 import dynet as dy
+import numpy as np
 
 from xnmt import batchers, param_collections, expression_seqs
 from xnmt.modelparts import bridges, transforms, scorers, embedders
@@ -165,7 +166,7 @@ class AutoRegressiveDecoder(Decoder, Serializable):
     return new_state
 
   def _calc_transform(self, mlp_dec_state: AutoRegressiveDecoderState) -> dy.Expression:
-    h = dy.concatenate([mlp_dec_state.rnn_state.output(), mlp_dec_state.context])
+    h = dy.concatenate([mlp_dec_state.as_vector(), mlp_dec_state.context])
     return self.transform.transform(h)
 
   def best_k(self, mlp_dec_state: AutoRegressiveDecoderState, k: numbers.Integral, normalize_scores: bool = False):
@@ -344,40 +345,17 @@ class RnngDecoder(Decoder, Serializable):
     self.state_transform = state_transform
 
   def calc_state(self, dec_state : RnngDecoderState):
-    state_in = dy.concatenate([dec_state.as_vector(), dec_state.context])
+    s = dec_state.as_vector()
+    c = dec_state.context
+    if s.dim()[1] != c.dim()[1]:
+      s2 = [s for _ in range(c.dim()[1])]
+      s = dy.concatenate_to_batch(s2)
+    if s.dim()[0] != c.dim()[1]:
+      c = dy.reshape(c, s.dim()[0])
+    assert s.dim() == c.dim(), 'state dim is %s but should be %s' % (str(s.dim()), str(c.dim()))
+    state_in = dy.concatenate([s, c])
     state = self.state_transform.transform(state_in)
     return state
-
-  def calc_subloss_batch(self, state: dy.Expression, ref_action_type: batchers.ListBatch, ref_action_subtype: batchers.ListBatch):
-    N = len(ref_action_type)
-    used_action_types = set(ref_action_type)
-    sublosses = [None for _ in range(N)]
-    for action_type in used_action_types:
-      states = []
-      subtypes = []
-      indices = []
-      for i in range(N):
-        if ref_action_type[i] == action_type:
-          states.append(dy.pick_batch_elem(state, i))
-          subtypes.append(ref_action_subtype[i])
-          indices.append(i)
-      states = dy.concatenate_to_batch(states)
-      subtypes = batchers.ListBatch(subtypes)
-      if action_type == RnngVocab.SHIFT:
-        subloss = self.term_scorer.calc_loss(states, subtypes)
-      elif action_type == RnngVocab.NT:
-        subloss = self.nt_scorer.calc_loss(states, subtypes)
-      else:
-        subloss = dy.zeros(1, batch_size=len(subtypes))
-
-      assert subloss.dim()[1] == len(indices)
-      for i in range(len(indices)):
-        idx = indices[i]
-        assert sublosses[idx] is None
-        sublosses[idx] = dy.pick_batch_elem(subloss, i)
-
-    assert None not in sublosses
-    return dy.concatenate_to_batch(sublosses)
 
   def calc_loss(self, dec_state : RnngDecoderState, ref_action : RnngAction):
     assert dec_state.context != None
@@ -399,11 +377,10 @@ class RnngDecoder(Decoder, Serializable):
       subloss = self.calc_subloss(state, ref_action_type, ref_action_subtype)
     else:
       subloss = self.calc_subloss_batch(state, ref_action_type, ref_action_subtype)
-
     loss = action_loss + subloss
 
     if batched:
-      mask = dy.concatenate_to_batch([dy.scalarInput(1 if r != RnngVocab.NONE else 0) for r in ref_action_type])
+      mask = dy.inputTensor([1 if r != RnngVocab.NONE else 0 for r in ref_action_type], batched=True)
       loss = dy.cmult(loss, mask)
 
     return loss
@@ -419,6 +396,21 @@ class RnngDecoder(Decoder, Serializable):
       nt_loss = self.nt_scorer.calc_loss(state, ref_action_subtype)
       return nt_loss
     return dy.zeros((1,))
+
+  def calc_subloss_batch(self, state: dy.Expression, ref_action_type: batchers.ListBatch, ref_action_subtype: batchers.ListBatch):
+    N = len(ref_action_type)
+    used_action_types = set(ref_action_type)
+    subloss = dy.zeros(1, batch_size=N)
+    for action_type in used_action_types:
+      if action_type == RnngVocab.SHIFT or action_type == RnngVocab.NT:
+        mask = dy.inputTensor([1 if r == action_type else 0 for r in ref_action_type], batched=True)
+        subtypes = batchers.ListBatch([ref_action_subtype[i] if ref_action_type[i] == action_type else 0 for i in range(N)])
+        scorer = self.term_scorer if action_type == RnngVocab.SHIFT else self.nt_scorer
+        scores = scorer.calc_loss(state, subtypes)
+        for s, m in zip(scores.npvalue().flatten(), mask.npvalue().flatten()):
+          assert np.isfinite(s), '%s\n%s' % (str(scores.npvalue().flatten()), str(mask.npvalue().flatten()))
+        subloss += dy.cmult(scores, mask)
+    return subloss
 
   def calc_log_probs(self, dec_state : RnngDecoderState):
     raise NotImplementedError()
@@ -738,7 +730,7 @@ class RnngDecoder(Decoder, Serializable):
 #     return dy.sum_dim(self.lexicon_method(mlp_dec_state, score, lex_prob), [1])
 #
 #   def linear(self, mlp_dec_state, score, lex_prob):
-#     coef = dy.logistic(self.linear_projector(mlp_dec_state.rnn_state.output()))
+#     coef = dy.logistic(self.linear_projector(mlp_dec_state.as_vector()))
 #     return dy.log(dy.cmult(dy.softmax(score), coef) + dy.cmult((1-coef), lex_prob))
 #
 #   def bias(self, mlp_dec_state, score, lex_prob):
