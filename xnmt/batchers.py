@@ -866,3 +866,35 @@ class SyntaxTreeBatcher(InOrderBatcher, Serializable):
       node_vectors += src_sent.node_vectors
       offsets.append(len(node_vectors))
     return SyntaxTreeBatch(structures, offsets, node_vectors)
+
+class WordSrcSyntaxTreeBatcher(WordSrcBatcher, Serializable):
+  yaml_tag = '!WordSrcSyntaxTreeBatcher'
+
+  @serializable_init
+  def __init__(self,
+               words_per_batch: Optional[numbers.Integral] = None,
+               avg_batch_size: Optional[numbers.Real] = None,
+               break_ties_randomly: bool = True,
+               pad_src_to_multiple: numbers.Integral = 1) -> None:
+    super().__init__(words_per_batch, avg_batch_size, break_ties_randomly, pad_src_to_multiple)
+
+  def create_single_batch(self, src_sents, trg_sents, sort_by_trg_len):
+    if trg_sents is not None and sort_by_trg_len:
+      src_sents, trg_sents = zip(*sorted(zip(src_sents, trg_sents), key=lambda x: x[1].sent_len(), reverse=True))
+    src_batch = self._make_src_batch(src_sents)
+
+    if trg_sents:
+      trg_batch = pad(trg_sents)
+      return src_batch, trg_batch
+    else:
+      return src_batch
+
+  def _make_src_batch(self, src_sents, pad_symbol=0):
+    structures = []
+    offsets = []
+    node_vectors = []
+    for src_sent in src_sents:
+      structures.append(src_sent.structure)
+      node_vectors += src_sent.node_vectors
+      offsets.append(len(node_vectors))
+    return SyntaxTreeBatch(structures, offsets, node_vectors)
