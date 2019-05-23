@@ -151,10 +151,18 @@ class BeamSearch(Serializable, SearchStrategy):
     completed_hyp = []
     for length in range(self.max_len):
       if len(completed_hyp) >= self.beam_size:
-        break
+        completed_hyp = sorted(completed_hyp, key=lambda hyp: hyp.score, reverse=True)
+        completed_hyp = completed_hyp[:self.beam_size]
+        worst_complete_hyp_score = completed_hyp[-1].score
+        active_hyp = [hyp for hyp in active_hyp if hyp.score >= worst_complete_hyp_score]
+        # Assumption: each additional word will always *decrease* the total score.
+        if len(active_hyp) == 0:
+          break
+
       # Expand hyp
       new_set = []
       for hyp in active_hyp:
+        # Note: prev_word has *not* yet been added to prev_state
         if length > 0:
           prev_word = hyp.word
           prev_dec_state = hyp.output.dec_state
@@ -164,7 +172,7 @@ class BeamSearch(Serializable, SearchStrategy):
           prev_dec_state = initial_dec_state
           prev_att_state = initial_att_state
 
-        # We have a complete hyp ending with </s>
+        # We have a complete hypothesis
         if prev_word == Vocab.ES:
           completed_hyp.append(hyp)
           continue
@@ -172,6 +180,8 @@ class BeamSearch(Serializable, SearchStrategy):
         # Find the k best words at the next time step
         current_output = translator.add_input(prev_word, prev_dec_state, prev_att_state)
         top_words, top_scores = translator.best_k(current_output, self.beam_size, normalize_scores=True)
+        assert len(top_words) == len(top_scores)
+        assert len(top_words) > 0
 
         # Queue next states
         for cur_word, score in zip(top_words, top_scores):
@@ -184,6 +194,7 @@ class BeamSearch(Serializable, SearchStrategy):
 
     # There is no hyp that reached </s>
     if len(completed_hyp) == 0:
+      assert len(active_hyp) > 0
       completed_hyp = active_hyp
 
     # Length Normalization
@@ -192,7 +203,7 @@ class BeamSearch(Serializable, SearchStrategy):
 
     # Take only the one best, if that's what was desired
     if self.one_best:
-      hyp_and_score = [hyp_and_score[0]]
+      hyp_and_score = hyp_and_score[:1]
 
     # Backtracing + Packing outputs
     results = []
