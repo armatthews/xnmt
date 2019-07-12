@@ -282,12 +282,13 @@ class SyntaxTreeNode:
     self.parent = parent
     self.children = children if children else []
 
-  def annotate(self, idx=0):
+  def annotate(self, idx=0, path=[]):
     self.dtr = 0 if self.parent is None else self.parent.dtr + 1
     self.idx = idx
+    self.path = path
     idx += 1
-    for child in self.children:
-      idx = child.annotate(idx)
+    for i, child in enumerate(self.children):
+      idx = child.annotate(idx, path + [i])
     if len(self.children) == 0:
       self.min_dtl = 0
       self.max_dtl = 0
