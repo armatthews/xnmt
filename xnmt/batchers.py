@@ -792,7 +792,8 @@ class BinarySyntaxTreeBatcher(WordSrcBatcher, Serializable):
 
   @serializable_init
   def __init__(self,
-               avg_batch_size: numbers.Integral = 1) -> None:
+               avg_batch_size: numbers.Integral = 1, pad_src_to_multiple=1) -> None:
+    assert pad_src_to_multiple == 1
     super().__init__(avg_batch_size=avg_batch_size, pad_src_to_multiple=1)
 
   def create_single_batch(self, src_sents, trg_sents, sort_by_trg_len):
@@ -843,7 +844,8 @@ class SyntaxTreeBatcher(InOrderBatcher, Serializable):
 
   @serializable_init
   def __init__(self,
-               batch_size: numbers.Integral = 1) -> None:
+               batch_size: numbers.Integral = 1, pad_src_to_multiple=1) -> None:
+    assert pad_src_to_multiple == 1
     super().__init__(batch_size=batch_size, pad_src_to_multiple=1)
 
   def create_single_batch(self, src_sents, trg_sents, sort_by_trg_len):
