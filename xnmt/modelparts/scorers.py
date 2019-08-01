@@ -192,7 +192,7 @@ class Softmax(Scorer, Serializable):
 
   def calc_loss(self, x: dy.Expression, y: Union[numbers.Integral, List[numbers.Integral]]) -> dy.Expression:
     if self.can_loss_be_derived_from_scores():
-      scores = self.calc_scores(x)
+      scores = self.calc_scores(x) + 1.e-15
       # single mode
       if not batchers.is_batched(y):
         loss = dy.pickneglogsoftmax(scores, y)
