@@ -82,6 +82,7 @@ class Experiment(Serializable):
   @serializable_init
   def __init__(self,
                name: str,
+               save: bool = True,
                exp_global: Optional[ExpGlobal] = bare(ExpGlobal),
                preproc: Optional[preproc.PreprocRunner] = None,
                model: Optional[models_base.TrainableModel] = None,
@@ -90,6 +91,7 @@ class Experiment(Serializable):
                random_search_report: Optional[dict] = None,
                status: Optional[str] = None) -> None:
     self.name = name
+    self.save = save
     self.exp_global = exp_global
     self.preproc = preproc
     self.model = model
@@ -127,7 +129,8 @@ class Experiment(Serializable):
             eval_scores.append(eval_score)
 
       self.save_processed_arg("status", "done")
-      save_fct()
+      if self.save:
+        save_fct()
     else:
       logger.info("Experiment already finished, skipping.")
 
