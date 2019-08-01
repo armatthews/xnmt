@@ -1,4 +1,5 @@
 import sys
+import math
 import numbers
 from collections import defaultdict
 from typing import List, Optional, Sequence, Tuple, Union
@@ -36,6 +37,148 @@ def zip_trees(trees):
   label = dy.esum([tree.label for tree in trees])
   return SyntaxTree(label, children)
 
+class StumpTreePosEmbedder(Serializable):
+  yaml_tag = '!StumpTreePosEmbedder'
+
+  @serializable_init
+  def __init__(self,
+               dim=Ref("exp_global.default_layer_dim"),
+               depth=5,
+               embs=None):
+    self.dim = dim
+    self.depth = depth
+
+    model = param_collections.ParamManager.my_params(self)
+    if embs is None:
+      self.embs = []
+      for _ in range(2**depth):
+        emb = model.add_parameters((dim,))
+        self.embs.append(emb)
+    else:
+      self.embs = []
+
+  def embed(self, trees) -> List[dy.Expression]:
+    r = []
+    for tree in trees:
+      tree_emb = self.embed_node(tree)
+      assert len(tree_emb) == len(list(tree.nodes()))
+      r += tree_emb
+    return r
+
+  def embed_node(self, node, parent=None) -> List[dy.Expression]:
+    if len(node.path) > self.depth:
+      emb = parent
+    else:
+      p = node.path
+      i = 0
+      for j in p:
+        i *= 2
+        i += j
+
+      emb = self.embs[i]
+      if parent is not None:
+        emb += parent
+
+    r = [emb]
+    for child in node.children:
+      r += self.embed_node(child, emb)
+    return r
+
+class MarkovTreePosEmbedder(Serializable):
+  yaml_tag = '!MarkovTreePosEmbedder'
+
+  @serializable_init
+  def __init__(self,
+               dim=Ref("exp_global.default_layer_dim"),
+               order=5,
+               embs=None):
+    self.dim = dim
+    self.order = order
+
+    model = param_collections.ParamManager.my_params(self)
+    if embs is None:
+      self.embs = []
+      for _ in range(2**order):
+        emb = model.add_parameters((dim,))
+        self.embs.append(emb)
+    else:
+      self.embs = []
+
+  def embed(self, trees) -> List[dy.Expression]:
+    r = []
+    for tree in trees:
+      tree_emb = self.embed_node(tree)
+      assert len(tree_emb) == len(list(tree.nodes()))
+      r += tree_emb
+    return r
+
+  def embed_node(self, node, parent=None) -> List[dy.Expression]:
+    p = node.path[-self.order:]
+    i = 0
+    for j in p:
+      i *= 2
+      i += j
+
+    emb = self.embs[i]
+    if parent is not None:
+      emb += parent
+    r = [emb]
+    for child in node.children:
+      r += self.embed_node(child, emb)
+    return r
+
+class PathTreePosEmbedder(Serializable):
+  yaml_tag = '!PathTreePosEmbedder'
+
+  @serializable_init
+  def __init__(self,
+               dim=Ref("exp_global.default_layer_dim")):
+    self.dim = dim
+
+  def embed(self, trees) -> List[dy.Expression]:
+    r = []
+    for i, tree in enumerate(trees):
+      for j, node in enumerate(tree.nodes()):
+        r.append(self.make_pos_emb(node.path))
+    return r
+
+  def make_pos_emb(self, path):
+    e = [-1 if p == 0 else 1 for p in path]
+    e += [0] * (self.dim - len(path))
+    return dy.inputTensor(np.array(e))
+
+class SinusoidTreePosEmbedder(Serializable):
+  yaml_tag = '!SinusoidTreePosEmbedder'
+
+  @serializable_init
+  def __init__(self,
+               dim=Ref("exp_global.default_layer_dim")):
+    assert dim % 2 == 0
+    self.dim = dim
+    self.pos_embs = {}
+
+  def embed(self, trees) -> List[dy.Expression]:
+    k = 0
+    r = []
+    for i, tree in enumerate(trees):
+      for j, node in enumerate(tree.nodes()):
+        print(node.label + ' ' + str(node.path) + ' ' + str(node.parent.label if node.parent else '[None]'))
+        assert len(r) == k
+        r.append(self.get_pos_emb(node.dtr))
+        k += 1
+    return r
+
+  def make_pos_emb(self, pos):
+    v = [0. for _ in range(self.dim)]
+    for i in range(self.dim // 2):
+      v[2 * i] = math.sin(pos / 10000. ** (2 * i / self.dim))
+      v[2 * i + 1] = math.cos(pos / 10000. ** (2 * i / self.dim))
+    return np.array(v)
+
+  def get_pos_emb(self, pos):
+    if pos not in self.pos_embs:
+      self.pos_embs[pos] = self.make_pos_emb(pos)
+    return dy.inputTensor(self.pos_embs[pos])
 
 class SyntaxTreeEncoder(transducers.SeqTransducer, Serializable):
   """
@@ -572,6 +715,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
                max_arity: numbers.Integral = 2,
                input_dim=Ref("exp_global.default_layer_dim"),
                hidden_dim=Ref("exp_global.default_layer_dim"),
+               pos_embedder=None,
                term_encoder=bare(recurrent.BiLSTMSeqTransducer),
                root_transform=bare(transforms.NonLinear),
                rev_gru=bare(recurrent.UniGRUSeqTransducer),
@@ -581,6 +725,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     self.max_arity = max_arity
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
+    self.pos_embedder = pos_embedder
     self.create_parameters(layers, param_init, bias_init, max_arity)
     self.root_transform = root_transform
     self.rev_gru = rev_gru
@@ -621,6 +766,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         children = [dy.concatenate_to_batch(children_i) for children_i in children]
 
         # Compute the TreeGRU stuff
+        assert len(children) <= self.max_arity
         i = self.compute_gate('i', layer_idx, labels, children)
         f = [self.compute_gate('f%d' % j, layer_idx, labels, children) for j in range(len(children))]
         r = [self.compute_gate('r%d' % j, layer_idx, labels, children) for j in range(len(children))]
@@ -753,6 +899,9 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
     inside = self.embed_tree_inside(encoded, layer_idx)
     outside = self.embed_tree_outside(inside, layer_idx)
     combined = self.combine_trees([inside, outside])
+    if self.pos_embedder:
+      pos_embs = self.pos_embedder.embed(batch.trees)
+      combined = batchers.SyntaxTreeBatch(combined.trees, combined.offsets, [c + p for (c, p) in zip(combined.node_vectors, pos_embs)])
     return combined
 
   def linearize(self, batch: batchers.SyntaxTreeBatch) -> expression_seqs.ExpressionSequence:
