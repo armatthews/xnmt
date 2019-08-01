@@ -29,6 +29,7 @@ from collections import OrderedDict
 import collections.abc
 from typing import List, Set, Callable, TypeVar, Type, Union, Optional, Dict, Any
 import inspect, random
+import sys
 
 import yaml
 
@@ -1385,6 +1386,7 @@ def save_to_file(fname: str, mod: Any) -> None:
     fname: Filename to save to.
     mod: Component hierarchy.
   """
+  print('Saving model to ' + fname, file=sys.stderr)
   dirname = os.path.dirname(fname)
   if dirname and not os.path.exists(dirname):
     os.makedirs(dirname)
