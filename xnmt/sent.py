@@ -427,7 +427,7 @@ class RnngSentence(ReadableSentence):
     return [self.vocab[w] for w in self.words]
 
   def len_unpadded(self):
-    return len(self.words)
+    return len([word for word in self.words if word.action != RnngVocab.NONE])
 
   def create_padded_sent(self, pad_len: numbers.Integral):
     words = self.words + [RnngAction(RnngVocab.NONE, None) for _ in range(pad_len)]
