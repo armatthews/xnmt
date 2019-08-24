@@ -14,6 +14,7 @@ from xnmt.modelparts.scorers import find_best_k
 from xnmt.models import base
 from xnmt.transducers import recurrent, base as transducers_base
 from xnmt.persistence import serializable_init, Serializable, bare
+from xnmt.specialized_encoders import syntax
 
 from xnmt.reports import Reportable
 
@@ -139,6 +140,7 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
 
       rnn_output = dec_state.as_vector()
       attention = self.attender.calc_attention(rnn_output, att_state)
+
       att_state = self.attender.update(rnn_output, att_state, attention)
       dec_state.context = self.attender.calc_context(rnn_output, att_state, attention)
       word_loss = self.decoder.calc_loss(dec_state, ref_word)
@@ -218,6 +220,8 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
     search_outputs = self.generate_search_output(src, search_strategy)
     if isinstance(src, batchers.CompoundBatch): src = src.batches[0]
     sorted_outputs = sorted(search_outputs, key=lambda x: x.score[0], reverse=True)
+    for item in sorted_outputs:
+      print('Score: ' + str(item.score[0]), file=sys.stderr)
     assert len(sorted_outputs) >= 1
     outputs = []
     for curr_output in sorted_outputs:
@@ -234,7 +238,7 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
         outputs.append(out_sent)
       else:
         outputs.append(sent.NbestSentence(base_sent=out_sent, nbest_id=src[0].idx))
-    
+
     if self.is_reporting():
       attentions = np.concatenate([x.npvalue() for x in attentions], axis=1)
       self.report_sent_info({"attentions": attentions,
@@ -252,6 +256,7 @@ class DefaultTranslator(AutoRegressiveTranslator, Serializable, Reportable):
 
     next_dec_state = self.decoder.add_input(dec_state, word) if word is not None else dec_state
     attention = self.attender.calc_attention(next_dec_state.as_vector(), att_state)
+
     next_att_state = self.attender.update(next_dec_state.as_vector(), att_state, attention)
     context = self.attender.calc_context(next_dec_state.as_vector(), attention=attention)
     next_dec_state.context = context
