@@ -123,6 +123,7 @@ class Inference(object):
     if max_src_len is not None and src_len > max_src_len:
       output_txt = "\n".join([NO_DECODING_ATTEMPTED] * batch_size)
       fp.write(f"{output_txt}\n")
+      fp.flush()
     else:
       with utils.ReportOnException({"src": src_batch, "graph": utils.print_cg_conditional}):
         dy.renew_cg(immediate_compute=settings.IMMEDIATE_COMPUTE, check_validity=settings.CHECK_VALIDITY)
@@ -131,6 +132,7 @@ class Inference(object):
         for i in range(len(outputs)):
           output_txt = outputs[i].sent_str(custom_output_procs=self.post_processor)
           fp.write(f"{output_txt}\n")
+          fp.flush()
 
   def _generate_output(self, generator: 'models.GeneratorModel', src_file: str,
                        trg_file: str, batcher: Optional[batchers.Batcher] = None, max_src_len: Optional[int] = None) -> None:
