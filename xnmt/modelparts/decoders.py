@@ -2,6 +2,8 @@ from typing import Any, Union
 from collections import namedtuple
 import numbers
 import heapq
+import random
+import math
 
 import dynet as dy
 import numpy as np
@@ -159,10 +161,14 @@ class AutoRegressiveDecoder(Decoder, Serializable):
     if self.truncate_dec_batches:
       rnn_state, inp = batchers.truncate_batches(rnn_state, inp)
     new_rnn_state = rnn_state.add_input(inp)
+    try:
+      complete = batchers.mark_as_batch([w == Vocab.ES for w in trg_word])
+    except TypeError:
+      complete = (trg_word == Vocab.ES)
     new_state =  AutoRegressiveDecoderState(
         rnn_state=new_rnn_state,
         context=mlp_dec_state.context,
-        complete=(trg_word == Vocab.ES))
+        complete=complete)
     return new_state
 
   def _calc_transform(self, mlp_dec_state: AutoRegressiveDecoderState) -> dy.Expression:
@@ -203,6 +209,22 @@ class RnngDecoderState(object):
     self.stack_lstm_state = stack_lstm_state
     self.context = None
 
+    self.pos_embs = {}
+
+  def make_pos_emb(self, pos):
+    self.hidden_dim = 512
+    assert self.hidden_dim % 2 == 0
+    v = [0. for _ in range(self.hidden_dim)]
+    for i in range(self.hidden_dim // 2):
+      v[2 * i] = math.sin(pos / 10000. ** (2 * i / self.hidden_dim))
+      v[2 * i + 1] = math.cos(pos / 10000. ** (2 * i / self.hidden_dim))
+    return np.array(v)
+
+  def get_pos_emb(self, pos):
+    if pos not in self.pos_embs:
+      self.pos_embs[pos] = self.make_pos_emb(pos)
+    return dy.inputTensor(self.pos_embs[pos])
+
   def __str__(self):
     return '\n'.join(['stack: ' + str(self.stack), 'terms:' + str(self.terminals)])
 
@@ -241,6 +263,7 @@ class RnngDecoderState(object):
       actions_vec = self.action_lstm_state.output()
       r += actions_vec
 
+    #r += self.get_pos_emb(len(self.stack))
     return r
 
   def is_complete(self):
@@ -276,6 +299,9 @@ class RnngDecoderStateBatch(batchers.ListBatch):
     r = batchers.mark_as_batch(r)
     assert self.batch_size() == r.batch_size()
     return r
+
+  def is_complete(self):
+    return all([elem.is_complete() for elem in self])
 
 class RnngDecoderBase(Decoder, Serializable):
   yaml_tag = '!RnngDecoderBase'
@@ -435,6 +461,8 @@ class RnngDecoderBase(Decoder, Serializable):
     assert len(dec_state.stack) > 0
     word_emb = self.embedder.embed_terminal(word_id)
     word_emb = self.word_emb_transform.transform(word_emb)
+    #if random.random() < 0.1:
+    #  word_emb *= 0
 
     new_state = dec_state.copy()
     new_state.stack[-1].children.append(word_emb)
@@ -453,6 +481,8 @@ class RnngDecoderBase(Decoder, Serializable):
     assert not dec_state.is_forbidden(RnngAction(RnngVocab.NT, nt_id))
     nt_emb = self.embedder.embed_nt(nt_id)
     nt_emb = self.word_emb_transform.transform(nt_emb)
+    #if random.random() < 0.1:
+    #  nt_emb *= 0
 
     new_state = dec_state.copy()
     new_state.stack.append(RnngStackElement(nt_id, [], dec_state.stack_lstm_state))
@@ -568,7 +598,7 @@ class RnngDecoderBase(Decoder, Serializable):
         heapq.heappush(best_actions, (-total_score, action))
 
     # Add REDUCE action
-    if True:
+    if False:
       action = RnngAction(RnngVocab.REDUCE, None)
       total_score = reduce_score
       if not dec_state.is_forbidden(action):
@@ -582,6 +612,31 @@ class RnngDecoderBase(Decoder, Serializable):
         r_actions.append(action)
         r_scores.append(-score)
     return r_actions, r_scores
+
+  def sample(self, dec_state: RnngDecoderState, n: numbers.Integral, temperature: float = 1.0):
+    assert n == 1
+    state = self.calc_state(dec_state)
+    actions = self.action_scorer.sample(state, n, temperature)
+    action = RnngAction(actions[0][0], 0)
+
+    # Some hack thing to not produce invalid actions
+    tries = 0
+    fb = dec_state.is_forbidden(action)
+    while fb == True or (batchers.is_batched(fb) and any(fb)) or action.action == 3:
+      actions = self.action_scorer.sample(state, n, temperature)
+      action = RnngAction(actions[0][0], 0)
+      fb = dec_state.is_forbidden(action)
+      tries += 1
+      assert tries < 100
+
+    if actions[0][0] == RnngVocab.SHIFT:
+      subaction = self.term_scorer.sample(state, n)
+      return [(RnngAction(RnngVocab.SHIFT, subaction[0][0]), actions[0][1] + subaction[0][1])]
+    elif actions[0][0] == RnngVocab.NT:
+      subaction = self.nt_scorer.sample(state, n)
+      return [(RnngAction(RnngVocab.NT, subaction[0][0]), actions[0][1] + subaction[0][1])]
+    else:
+      assert False
 
   def shared_params(self):
     return [{".embedder.nt_emb.emb_dim", ".embedder.term_emb.emb_dim"},
@@ -680,7 +735,7 @@ class BinaryRnngDecoder(RnngDecoderBase, Serializable):
     # If we have only one child, fill in zeros for the other child
     if len(children) == 1:
       children.append(dy.zeros(children[0].dim()[0]))
-    assert len(children) == 2
+    assert len(children) == 2, 'Expected exactly two children but got %d' % len(children)
 
     # Concatenate the label and the two children and transform
     c = dy.concatenate([nt_emb] + children)
