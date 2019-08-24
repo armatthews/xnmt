@@ -23,6 +23,13 @@ def linearize(tree: SyntaxTree):
     r += linearize(child)
   return expression_seqs.ExpressionSequence(r)
 
+def nt_mask(tree: SyntaxTree):
+  """Gets a mask with 1s in the positions of non-terminals and 0s in the positions of terminals"""
+  r = [1 if len(tree.children) > 0 else 0]
+  for child in tree.children:
+    r += nt_mask(child)
+  return r
+
 def zip_trees(trees):
   """Takes a list of trees, all with the same structure,
   and returns a new tree wherein each node's vector is the
@@ -619,91 +626,6 @@ class TreeGRU(TreeRNN, Serializable):
     new_tree.h = h
     return new_tree
 
-"""class BidirTreeGRU(TreeGRU, Serializable):
-  yaml_tag = '!BidirTreeGRU'
-
-  @register_xnmt_handler
-  @serializable_init
-  def __init__(self,
-               layers: numbers.Integral = 1,
-               input_dim=Ref("exp_global.default_layer_dim"),
-               hidden_dim=Ref("exp_global.default_layer_dim"),
-               term_encoder=bare(recurrent.BiLSTMSeqTransducer),
-               root_transform=bare(transforms.NonLinear),
-               rev_gru=bare(recurrent.UniGRUSeqTransducer),
-               param_init: param_initializers.ParamInitializer = Ref("exp_global.param_init", default=bare(param_initializers.GlorotInitializer)),
-               bias_init: param_initializers.ParamInitializer = Ref("exp_global.bias_init", default=bare(param_initializers.ZeroInitializer))) -> None:
-    self.layers = layers
-    self.input_dim = input_dim
-    self.hidden_dim = hidden_dim
-    self.create_parameters(layers, param_init, bias_init)
-    self.root_transform = root_transform
-    self.rev_gru = rev_gru
-
-  def embed_tree_inside(self, tree: SyntaxTree, layer_idx):
-    assert len(tree.children) <= 2
-    children = [self.embed_tree_inside(child, layer_idx) for child in tree.children]
-
-    i = self.compute_gate('i', layer_idx, tree.label, children)
-    f = [self.compute_gate('f%d' % j, layer_idx, tree.label, children) for j in range(len(children))]
-    r = [self.compute_gate('r%d' % j, layer_idx, tree.label, children) for j in range(len(children))]
-    u = self.compute_u(layer_idx, tree.label, children, r)
-    h = self.compute_h(u, children, i, f)
-
-    new_tree = SyntaxTree(h, children)
-    new_tree.h = h
-    return new_tree
-
-  def embed_tree_outside(self, tree: SyntaxTree, layer_idx, parent: dy.Expression):
-    if parent == None:
-      h = self.root_transform.transform(tree.h)
-    else:
-      h = self.rev_gru.add_input_to_prev(parent, tree.h)
-      assert len(h) == 1
-      h = h[0]
-    children = [self.embed_tree_outside(child, layer_idx, h) for child in tree.children]
-
-    new_tree = SyntaxTree(h, children)
-    new_tree.h = h
-    return new_tree
-
-  def update_h(self, tree: SyntaxTree):
-    tree.h = tree.label
-    for child in tree.children:
-      self.update_h(child)
-
-  def replace_terms(self, tree: SyntaxTree, terms: expression_seqs.ExpressionSequence):
-    if len(tree.children) == 0:
-      return SyntaxTree(terms[0], []), terms[1:]
-
-    children = []
-    for child in tree.children:
-      new_child, terms = self.replace_terms(child, terms)
-      children.append(new_child)
-
-    return SyntaxTree(tree.label, children), terms
-
-  def encode_tree(self, tree: SyntaxTree):
-    terms = tree.get_terminals()
-    terms = expression_seqs.ExpressionSequence(terms)
-    encoded_terms = self.term_encoder.transduce(terms)
-    tree, r = self.replace_terms(tree, encoded_terms)
-    assert len(r) == 0
-    return tree
-
-  def embed_tree(self, tree: SyntaxTree, layer_idx):
-    encoded = self.encode_tree(tree) if layer_idx == 0 else tree
-    inside = self.embed_tree_inside(encoded, layer_idx)
-    outside = self.embed_tree_outside(inside, layer_idx, None)
-    r = zip_trees([inside, outside])
-    self.update_h(r)
-    return r
-
-  def shared_params(self):
-    return [{".term_encoder.input_dim", ".input_dim"},
-            {".term_encoder.hidden_dim", ".input_dim"},
-            {".term_encoder.layers", ".layers"}]"""
-
 class BatchedBidirTreeGRU(TreeGRU, Serializable):
   yaml_tag = '!BatchedBidirTreeGRU'
 
@@ -768,10 +690,10 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         # Compute the TreeGRU stuff
         assert len(children) <= self.max_arity
         i = self.compute_gate('i', layer_idx, labels, children)
-        f = [self.compute_gate('f%d' % j, layer_idx, labels, children) for j in range(len(children))]
-        r = [self.compute_gate('r%d' % j, layer_idx, labels, children) for j in range(len(children))]
-        u = self.compute_u(layer_idx, labels, children, r)
-        h = self.compute_h(u, children, i, f)
+        f = [self.compute_gate('f%d' % j, layer_idx, labels, children) for j in range(len(children))] #zL and zR
+        r = [self.compute_gate('r%d' % j, layer_idx, labels, children) for j in range(len(children))] # rL and rR
+        u = self.compute_u(layer_idx, labels, children, r) # \tilde{h}
+        h = self.compute_h(u, children, i, f) # h_k
         assert len(nodes) == h.dim()[1]
 
         # Update the node_vectors array with the results
@@ -872,6 +794,9 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         v = dy.pick_batch_elem(col_i, j)
         term_vectors[j].append(v)
 
+    # Because we only replace the terminal vectors
+    # The term_encoder must output vectors of the
+    # same dimensionality as the input embeddings
     node_vectors = []
     for i, tree in enumerate(batch.trees):
       term_idx = 0
@@ -882,7 +807,7 @@ class BatchedBidirTreeGRU(TreeGRU, Serializable):
         else:
           node_vectors.append(batch.node_vectors[j])
 
-    r = batchers.SyntaxTreeBatch(batch.trees, batch.offsets, batch.node_vectors)
+    r = batchers.SyntaxTreeBatch(batch.trees, batch.offsets, node_vectors)
     return r
 
   def combine_trees(self, batches: List[batchers.SyntaxTreeBatch]) -> batchers.SyntaxTreeBatch:
