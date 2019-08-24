@@ -792,6 +792,7 @@ class LoadSerialized(Serializable):
     self.filename = filename
     self.path = path
     self.overwrite = overwrite
+    print('Loading model ' + str(self.filename), file=sys.stderr)
 
   @staticmethod
   def _check_wellformed(load_serialized):
