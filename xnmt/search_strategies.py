@@ -182,6 +182,12 @@ class BeamSearch(Serializable, SearchStrategy):
         assert len(top_words) > 0
 
         # Queue next states
+        current = hyp
+        word_ids = []
+        while current.parent is not None:
+          word_ids.append(current.word)
+          current = current.parent
+          
         for cur_word, score in zip(top_words, top_scores):
           assert len(score.shape) == 0
           new_score = self.len_norm.normalize_partial_topk(hyp.score, score, length + 1)
@@ -274,13 +280,15 @@ class SamplingSearch(Serializable, SearchStrategy):
     # Sample to the max length
     for length in range(self.max_len):
       current_output = translator.add_input(current_words, current_dec_state, current_att_state)
+      if current_output.dec_state.is_complete():
+        break
       word_id, word_score = translator.sample(current_output, 1)[0]
       word_score = word_score.npvalue()
       assert word_score.shape == (1,)
       word_score = word_score[0]
 
-      if len(word_id.shape) == 0:
-        word_id = np.array([word_id])
+      if type(word_id) != np.array or len(word_id.shape) == 0:
+        word_id = batchers.mark_as_batch([word_id])
         word_score = np.array([word_score])
 
       if done is not None:
@@ -301,15 +309,9 @@ class SamplingSearch(Serializable, SearchStrategy):
       current_dec_state = current_output.dec_state
       current_att_state = current_output.att_state
 
-      # Check done
-      done = [x == Vocab.ES for x in word_id]
-      # Check if we are done.
-      if all(done):
-        break
-
     # Packing output
     scores = [np.sum(scores)]
-    masks.insert(0, [1 for _ in range(len(done))])
+    masks.insert(0, [1 for _ in range(len(word_id))])
     samples = np.stack(samples, axis=1)
     return SearchOutput(samples, attentions, scores, [None for _ in samples], states, masks)
 
