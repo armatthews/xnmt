@@ -198,7 +198,7 @@ class AutoRegressiveDecoder(Decoder, Serializable):
 RnngStackElement = namedtuple('RnngStackElement', 'nt_id, children, prev_state')
 
 class RnngDecoderState(object):
-  MaxOpenNTs = 100
+  MaxOpenNTs = 250
 
   def __init__(self, stack_lstm_state=None, term_lstm_state=None, action_lstm_state=None):
     self.stack = [] # Stack of RnngStackElements
@@ -252,19 +252,24 @@ class RnngDecoderState(object):
     return False
 
   def as_vector(self):
-    stack_vec = self.stack_lstm_state.output()
-    r = stack_vec
+    vec_terms = []
+
+    if True:
+      stack_vec = self.stack_lstm_state.output()
+      vec_terms.append(stack_vec)
 
     if self.term_lstm_state is not None:
       terms_vec = self.term_lstm_state.output()
-      r += terms_vec
+      vec_terms.append(terms_vec)
 
     if self.action_lstm_state is not None:
       actions_vec = self.action_lstm_state.output()
-      r += actions_vec
+      vec_terms.append(actions_vec)
 
-    #r += self.get_pos_emb(len(self.stack))
-    return r
+    #vec_terms.append(self.get_pos_emb(len(self.stack)))
+
+    assert len(vec_terms) > 0
+    return dy.esum(vec_terms)
 
   def is_complete(self):
     return len(self.terminals) > 0 and len(self.stack) == 0
@@ -318,11 +323,12 @@ class RnngDecoderBase(Decoder, Serializable):
                vocab=None,
                term_lstm=None,
                action_lstm=None,
-               stack_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
+               stack_lstm=None,
                state_transform=bare(transforms.AuxNonLinear),
-               word_emb_transform=bare(transforms.Linear, bias=False),
+               word_emb_transform=bare(transforms.Linear, bias=False), 
                use_term_lstm=False,
-               use_action_lstm=False):
+               use_action_lstm=False,
+               use_stack_lstm=True):
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
     self.embedder = embedder
@@ -343,7 +349,9 @@ class RnngDecoderBase(Decoder, Serializable):
     if use_action_lstm:
       self.action_lstm = self.add_serializable_component("action_lstm", action_lstm,
                                                          lambda: recurrent.UniLSTMSeqTransducer(input_dim=self.input_dim, hidden_dim=self.hidden_dim, decoder_input_feeding=False))
-    self.stack_lstm = stack_lstm
+    if use_stack_lstm:
+      self.stack_lstm = self.add_serializable_component("stack_lstm", stack_lstm,
+                                                        lambda: recurrent.UniLSTMSeqTransducer(input_dim=self.input_dim, hidden_dim=self.hidden_dim, decoder_input_feeding=False))
 
     # Transform the word embeddings from embedder.emb_dim into hidden_dim
     self.word_emb_transform = word_emb_transform
@@ -442,6 +450,7 @@ class RnngDecoderBase(Decoder, Serializable):
   def stack_lstm_push(self,
                       stack_lstm_state: recurrent.UniLSTMState,
                       word_emb: dy.Expression):
+    assert self.use_stack_lstm
     return self.lstm_push(self.stack_lstm, stack_lstm_state, word_emb)
 
   def term_lstm_push(self,
@@ -466,7 +475,8 @@ class RnngDecoderBase(Decoder, Serializable):
 
     new_state = dec_state.copy()
     new_state.stack[-1].children.append(word_emb)
-    new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, word_emb)
+    if self.use_stack_lstm:
+      new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, word_emb)
 
     new_state.terminals.append(word_id)
     if self.use_term_lstm:
@@ -486,7 +496,8 @@ class RnngDecoderBase(Decoder, Serializable):
 
     new_state = dec_state.copy()
     new_state.stack.append(RnngStackElement(nt_id, [], dec_state.stack_lstm_state))
-    new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, nt_emb)
+    if self.use_stack_lstm:
+      new_state.stack_lstm_state = self.stack_lstm_push(dec_state.stack_lstm_state, nt_emb)
 
     if self.use_action_lstm:
       new_state.actions.append(RnngAction(RnngVocab.NT, nt_id))
@@ -511,7 +522,8 @@ class RnngDecoderBase(Decoder, Serializable):
     # For the last reduce of the sentence there will be no more stack
     if len(new_state.stack) > 0:
       new_state.stack[-1].children.append(composed)
-    new_state.stack_lstm_state = self.stack_lstm_push(prev_state, composed)
+    if self.use_stack_lstm:
+      new_state.stack_lstm_state = self.stack_lstm_push(prev_state, composed)
 
     if self.use_action_lstm:
       reduce_emb = self.embedder.embed(action)
@@ -564,7 +576,7 @@ class RnngDecoderBase(Decoder, Serializable):
       raise Exception()
 
   def initial_state(self, enc_final_states, ss_expr):
-    stack_lstm_state = self.stack_lstm.initial_state()
+    stack_lstm_state = self.stack_lstm.initial_state() if self.use_stack_lstm else None
     term_lstm_state = self.term_lstm.initial_state() if self.use_term_lstm else None
     action_lstm_state = self.action_lstm.initial_state() if self.use_action_lstm else None
     return RnngDecoderState(stack_lstm_state, term_lstm_state, action_lstm_state)
@@ -643,8 +655,6 @@ class RnngDecoderBase(Decoder, Serializable):
             {".embedder.nt_emb.emb_dim", ".word_emb_transform.input_dim"},
             {".hidden_dim", ".word_emb_transform.output_dim"},
             {".hidden_dim", ".action_scorer.input_dim"},
-            {".hidden_dim", ".stack_lstm.input_dim"},
-            {".hidden_dim", ".stack_lstm.hidden_dim"},
             {".hidden_dim", ".state_transform.input_dim"},
             {".input_dim", ".state_transform.aux_input_dim"},
             {".hidden_dim", ".state_transform.output_dim"},
@@ -665,15 +675,16 @@ class RnngDecoder(RnngDecoderBase, Serializable):
                vocab=None,
                term_lstm=None,
                action_lstm=None,
-               stack_lstm=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
+               stack_lstm=None,
                state_transform=bare(transforms.AuxNonLinear),
                word_emb_transform=bare(transforms.Linear, bias=False),
                use_term_lstm=False,
                use_action_lstm=False,
+               use_stack_lstm=True,
                comp_lstm_fwd=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                comp_lstm_rev=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                compose_transform=bare(transforms.NonLinear)):
-    super().__init__(input_dim, hidden_dim, embedder, action_scorer, term_scorer, nt_scorer, bridge, vocab, term_lstm, action_lstm, stack_lstm, state_transform, word_emb_transform, use_term_lstm, use_action_lstm)
+    super().__init__(input_dim, hidden_dim, embedder, action_scorer, term_scorer, nt_scorer, bridge, vocab, term_lstm, action_lstm, stack_lstm, state_transform, word_emb_transform, use_stack_lstm, use_term_lstm, use_action_lstm)
 
     # Composed representation of a treelet is composed as follows:
     # f = LSTM(label + children)
@@ -720,8 +731,9 @@ class BinaryRnngDecoder(RnngDecoderBase, Serializable):
                word_emb_transform=bare(transforms.Linear, bias=False),
                use_term_lstm=False,
                use_action_lstm=False,
+               use_stack_lstm=True,
                compose_transform=None):
-    super().__init__(input_dim, hidden_dim, embedder, action_scorer, term_scorer, nt_scorer, bridge, vocab, term_lstm, action_lstm, stack_lstm, state_transform, word_emb_transform, use_term_lstm, use_action_lstm)
+    super().__init__(input_dim, hidden_dim, embedder, action_scorer, term_scorer, nt_scorer, bridge, vocab, term_lstm, action_lstm, stack_lstm, state_transform, word_emb_transform, use_term_lstm, use_action_lstm, use_stack_lstm)
 
     # Composed representation of a treelet is composed as follows:
     # final = tanh(u * label + w * child1 + v * child2 + b)
