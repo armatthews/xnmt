@@ -254,7 +254,7 @@ class RnngDecoderState(object):
   def as_vector(self):
     vec_terms = []
 
-    if True:
+    if self.stack_lstm_state is not None:
       stack_vec = self.stack_lstm_state.output()
       vec_terms.append(stack_vec)
 
