@@ -198,8 +198,6 @@ class AutoRegressiveDecoder(Decoder, Serializable):
 RnngStackElement = namedtuple('RnngStackElement', 'nt_id, children, prev_state')
 
 class RnngDecoderState(object):
-  MaxOpenNTs = 250
-
   def __init__(self, stack_lstm_state=None, term_lstm_state=None, action_lstm_state=None):
     self.stack = [] # Stack of RnngStackElements
     self.terminals = [] # Generated terminals
@@ -228,11 +226,11 @@ class RnngDecoderState(object):
   def __str__(self):
     return '\n'.join(['stack: ' + str(self.stack), 'terms:' + str(self.terminals)])
 
-  def is_forbidden(self, a : RnngAction):
+  def is_forbidden(self, a: RnngAction, max_open_nts=250):
     if a.action not in [RnngVocab.SHIFT, RnngVocab.NT, RnngVocab.REDUCE, RnngVocab.NONE]:
       return True
 
-    if len(self.stack) >= RnngDecoderState.MaxOpenNTs:
+    if len(self.stack) >= max_open_nts:
       if a.action == RnngVocab.NT:
         return True
 
@@ -293,14 +291,14 @@ class RnngDecoderStateBatch(batchers.ListBatch):
   def as_vector(self):
     return dy.concatenate_to_batch([elem.as_vector() for elem in self])
 
-  def is_forbidden(self, word):
+  def is_forbidden(self, word, max_open_nts=250):
     if not batchers.is_batched(word):
       word = batchers.ListBatch([word] * self.batch_size())
 
     assert self.batch_size() == word.batch_size()
     r = []
     for i in range(self.batch_size()):
-      r.append(self[i].is_forbidden(word[i]))
+      r.append(self[i].is_forbidden(word[i], max_open_nts))
     r = batchers.mark_as_batch(r)
     assert self.batch_size() == r.batch_size()
     return r
@@ -328,7 +326,8 @@ class RnngDecoderBase(Decoder, Serializable):
                word_emb_transform=bare(transforms.Linear, bias=False), 
                use_term_lstm=False,
                use_action_lstm=False,
-               use_stack_lstm=True):
+               use_stack_lstm=True,
+               max_open_nts=250):
     self.input_dim = input_dim
     self.hidden_dim = hidden_dim
     self.embedder = embedder
@@ -336,6 +335,7 @@ class RnngDecoderBase(Decoder, Serializable):
     self.term_scorer = term_scorer
     self.nt_scorer = nt_scorer
     self.bridge = bridge
+    self.max_open_nts = max_open_nts
 
     self.vocab = vocab
 
@@ -466,7 +466,7 @@ class RnngDecoderBase(Decoder, Serializable):
     return self.lstm_push(self.action_lstm, action_lstm_state, word_emb)
 
   def perform_shift(self, dec_state : RnngDecoderState, word_id : numbers.Integral):
-    assert not dec_state.is_forbidden(RnngAction(RnngVocab.SHIFT, word_id))
+    assert not dec_state.is_forbidden(RnngAction(RnngVocab.SHIFT, word_id), self.max_open_nts)
     assert len(dec_state.stack) > 0
     word_emb = self.embedder.embed_terminal(word_id)
     word_emb = self.word_emb_transform.transform(word_emb)
@@ -488,7 +488,7 @@ class RnngDecoderBase(Decoder, Serializable):
     return new_state
 
   def perform_nt(self, dec_state, nt_id):
-    assert not dec_state.is_forbidden(RnngAction(RnngVocab.NT, nt_id))
+    assert not dec_state.is_forbidden(RnngAction(RnngVocab.NT, nt_id), self.max_open_nts)
     nt_emb = self.embedder.embed_nt(nt_id)
     nt_emb = self.word_emb_transform.transform(nt_emb)
     #if random.random() < 0.1:
@@ -509,7 +509,7 @@ class RnngDecoderBase(Decoder, Serializable):
 
   def perform_reduce(self, dec_state : RnngDecoderState):
     action = RnngAction(RnngVocab.REDUCE, None)
-    assert not dec_state.is_forbidden(action)
+    assert not dec_state.is_forbidden(action, self.max_open_nts)
     assert len(dec_state.stack) > 0
 
     new_state = dec_state.copy()
@@ -552,7 +552,7 @@ class RnngDecoderBase(Decoder, Serializable):
       dec_state = dec_state[0]
       assert type(dec_state) != RnngDecoderStateBatch
 
-    if dec_state.is_forbidden(word):
+    if dec_state.is_forbidden(word, self.max_open_nts):
       if type(dec_state) == RnngDecoderStateBatch:
         for s in dec_state:
           print('stack: %d, terms: %d' % (len(s.stack), len(s.terminals)))
@@ -560,9 +560,9 @@ class RnngDecoderBase(Decoder, Serializable):
         s = dec_state
         print('stack: %d, terms: %d' % (len(s.stack), len(s.terminals)))
       print('%s is forbidden in dec_state above.' % (self.vocab[word]))
-      print(dec_state.is_forbidden(word))
+      print(dec_state.is_forbidden(word, self.max_open_nts))
 
-    assert not dec_state.is_forbidden(word), '%s (type %s) is forbidden in dec_state %s (type %s)' % (str(word), str(type(word)), str(dec_state), str(type(dec_state)))
+    assert not dec_state.is_forbidden(word, self.max_open_nts), '%s (type %s) is forbidden in dec_state %s (type %s)' % (str(word), str(type(word)), str(dec_state), str(type(dec_state)))
     assert not dec_state.is_complete() or word.action == RnngVocab.NONE, 'Attempt to add to a complete hypothesis!'
     if word.action == RnngVocab.SHIFT:
       return self.perform_shift(dec_state, word.subaction)
@@ -581,7 +581,7 @@ class RnngDecoderBase(Decoder, Serializable):
     action_lstm_state = self.action_lstm.initial_state() if self.use_action_lstm else None
     return RnngDecoderState(stack_lstm_state, term_lstm_state, action_lstm_state)
 
-  def best_k(self, dec_state: RnngDecoderState, k: numbers.Integral, normalize_scores: bool = False):
+  def best_k(self, dec_state: RnngDecoderState, k: numbers.Integral, normalize_scores: bool = False, shifts_only: bool = False):
     state = self.calc_state(dec_state)
 
     action_log_probs = self.action_scorer.calc_log_probs(state).npvalue()
@@ -598,7 +598,7 @@ class RnngDecoderBase(Decoder, Serializable):
       assert term < len(self.vocab.term_vocab)
       action = RnngAction(RnngVocab.SHIFT, term)
       total_score = shift_score + score
-      if not dec_state.is_forbidden(action):
+      if not dec_state.is_forbidden(action, self.max_open_nts):
         heapq.heappush(best_actions, (-total_score, action))
 
     # Add best NT actions
@@ -606,21 +606,21 @@ class RnngDecoderBase(Decoder, Serializable):
       assert nt < len(self.vocab.nt_vocab), 'Attempt to get element %d from NT vocab of size %d' % (nt, len(self.vocab.nt_vocab))
       action = RnngAction(RnngVocab.NT, nt)
       total_score = nt_score + score
-      if not dec_state.is_forbidden(action):
+      if not dec_state.is_forbidden(action, self.max_open_nts) and not shifts_only:
         heapq.heappush(best_actions, (-total_score, action))
 
     # Add REDUCE action
     if False:
       action = RnngAction(RnngVocab.REDUCE, None)
       total_score = reduce_score
-      if not dec_state.is_forbidden(action):
+      if not dec_state.is_forbidden(action, self.max_open_nts) and not shifts_only:
         heapq.heappush(best_actions, (-total_score, action))
 
     r_actions = []
     r_scores = []
     while len(r_actions) < k and len(best_actions) > 0:
       score, action = heapq.heappop(best_actions)
-      if not dec_state.is_forbidden(action):
+      if not dec_state.is_forbidden(action, self.max_open_nts):
         r_actions.append(action)
         r_scores.append(-score)
     return r_actions, r_scores
@@ -633,11 +633,11 @@ class RnngDecoderBase(Decoder, Serializable):
 
     # Some hack thing to not produce invalid actions
     tries = 0
-    fb = dec_state.is_forbidden(action)
+    fb = dec_state.is_forbidden(action, self.max_open_nts)
     while fb == True or (batchers.is_batched(fb) and any(fb)) or action.action == 3:
       actions = self.action_scorer.sample(state, n, temperature)
       action = RnngAction(actions[0][0], 0)
-      fb = dec_state.is_forbidden(action)
+      fb = dec_state.is_forbidden(action, self.max_open_nts)
       tries += 1
       assert tries < 100
 
@@ -683,8 +683,9 @@ class RnngDecoder(RnngDecoderBase, Serializable):
                use_stack_lstm=True,
                comp_lstm_fwd=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
                comp_lstm_rev=bare(recurrent.UniLSTMSeqTransducer, decoder_input_feeding=False),
-               compose_transform=bare(transforms.NonLinear)):
-    super().__init__(input_dim, hidden_dim, embedder, action_scorer, term_scorer, nt_scorer, bridge, vocab, term_lstm, action_lstm, stack_lstm, state_transform, word_emb_transform, use_stack_lstm, use_term_lstm, use_action_lstm)
+               compose_transform=bare(transforms.NonLinear),
+               max_open_nts=250):
+    super().__init__(input_dim, hidden_dim, embedder, action_scorer, term_scorer, nt_scorer, bridge, vocab, term_lstm, action_lstm, stack_lstm, state_transform, word_emb_transform, use_stack_lstm, use_term_lstm, use_action_lstm, max_open_nts)
 
     # Composed representation of a treelet is composed as follows:
     # f = LSTM(label + children)
@@ -732,8 +733,9 @@ class BinaryRnngDecoder(RnngDecoderBase, Serializable):
                use_term_lstm=False,
                use_action_lstm=False,
                use_stack_lstm=True,
-               compose_transform=None):
-    super().__init__(input_dim, hidden_dim, embedder, action_scorer, term_scorer, nt_scorer, bridge, vocab, term_lstm, action_lstm, stack_lstm, state_transform, word_emb_transform, use_term_lstm, use_action_lstm, use_stack_lstm)
+               compose_transform=None,
+               max_open_nts=250):
+    super().__init__(input_dim, hidden_dim, embedder, action_scorer, term_scorer, nt_scorer, bridge, vocab, term_lstm, action_lstm, stack_lstm, state_transform, word_emb_transform, use_term_lstm, use_action_lstm, use_stack_lstm, max_open_nts)
 
     # Composed representation of a treelet is composed as follows:
     # final = tanh(u * label + w * child1 + v * child2 + b)
