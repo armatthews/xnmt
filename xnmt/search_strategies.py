@@ -6,11 +6,12 @@ import numbers
 import dynet as dy
 import numpy as np
 
-from xnmt import batchers, logger
+from xnmt import batchers, logger, vocabs
 from xnmt.modelparts import decoders, attenders
 from xnmt.length_norm import NoNormalization, LengthNormalization
 from xnmt.persistence import Serializable, serializable_init, bare
 from xnmt.vocabs import Vocab, RnngVocab
+from collections import defaultdict
 
 
 SearchOutput = namedtuple('SearchOutput', ['word_ids', 'attentions', 'score', 'logsoftmaxes', 'state', 'mask'])
@@ -146,15 +147,19 @@ class BeamSearch(Serializable, SearchStrategy):
                       initial_dec_state: decoders.DecoderState,
                       initial_att_state: attenders.AttenderState,
                       src_length: Optional[numbers.Integral] = None) -> List[SearchOutput]:
+
     # TODO(philip30): can only do single decoding, not batched
     active_hyp = [self.Hypothesis(0, None, None, None)]
     completed_hyp = []
     for length in range(self.max_len):
-      # TODO: Is this exit condition really legit?
       if len(completed_hyp) >= self.beam_size:
-        # TODO: Filter active hyps to only those with scores
-        # >= kth best. If there are none, then break.
-        break
+        completed_hyp = sorted(completed_hyp, key=lambda hyp: hyp.score, reverse=True)
+        completed_hyp = completed_hyp[:self.beam_size]
+        worst_complete_hyp_score = completed_hyp[-1].score
+        active_hyp = [hyp for hyp in active_hyp if hyp.score >= worst_complete_hyp_score]
+        # Assumption: each additional word will always *decrease* the total score.
+        if len(active_hyp) == 0:
+          break
 
       # Expand hyp
       new_set = []
@@ -176,18 +181,11 @@ class BeamSearch(Serializable, SearchStrategy):
           continue
 
         # Find the k best words at the next time step
-        current_output = translator.add_input(prev_word, prev_dec_state, prev_att_state)
         top_words, top_scores = translator.best_k(current_output, self.beam_size, normalize_scores=True)
         assert len(top_words) == len(top_scores)
         assert len(top_words) > 0
 
-        # Queue next states
-        current = hyp
-        word_ids = []
-        while current.parent is not None:
-          word_ids.append(current.word)
-          current = current.parent
-          
+        # Queue next states 
         for cur_word, score in zip(top_words, top_scores):
           assert len(score.shape) == 0
           new_score = self.len_norm.normalize_partial_topk(hyp.score, score, length + 1)
@@ -195,6 +193,297 @@ class BeamSearch(Serializable, SearchStrategy):
 
       # Next top hypothesis
       active_hyp = sorted(new_set, key=lambda x: x.score, reverse=True)[:self.beam_size]
+
+    # There is no hyp that reached </s>
+    if len(completed_hyp) == 0:
+      assert len(active_hyp) > 0
+      completed_hyp = active_hyp
+
+    # Length Normalization
+    normalized_scores = self.len_norm.normalize_completed(completed_hyp, src_length)
+    hyp_and_score = sorted(list(zip(completed_hyp, normalized_scores)), key=lambda x: x[1], reverse=True)
+
+    # Take only the one best, if that's what was desired
+    if self.one_best:
+      hyp_and_score = hyp_and_score[:1]
+
+    return self.backtrace(hyp_and_score)
+
+  def backtrace(self, hyp_and_score):
+    # Backtracing + Packing outputs
+    results = []
+    for end_hyp, score in hyp_and_score:
+      logsoftmaxes = []
+      word_ids = []
+      attentions = []
+      states = []
+      current = end_hyp
+      while current.parent is not None:
+        word_ids.append(current.word)
+        attentions.append(current.output.attention)
+        states.append((current.output.dec_state, current.output.att_state))
+        current = current.parent
+      results.append(SearchOutput([list(reversed(word_ids))], [list(reversed(attentions))],
+                                  [score], list(reversed(logsoftmaxes)),
+                                  list(reversed(states)), [1 for _ in word_ids]))
+    return results
+
+class RnngBagBeamSearch(Serializable, SearchStrategy):
+  """
+  Performs "bag-level" beam search for RNNG output.
+  See "Neural Generative Rhetorical Structure Parsing" (Mabona et al., 2019).
+  """
+
+  yaml_tag = '!RnngBagBeamSearch'
+  # Translator output contains dec state, att state, and attention
+  Hypothesis = namedtuple('Hypothesis', ['score', 'output', 'parent', 'word'])
+
+  @serializable_init
+  def __init__(self,
+               beam_size: numbers.Integral = 1,
+               max_len: numbers.Integral = 100,
+               len_norm: LengthNormalization = bare(NoNormalization),
+               one_best: bool = True,
+               scores_proc: Optional[Callable[[np.ndarray], None]] = None) -> None:
+    self.beam_size = beam_size
+    self.max_len = max_len
+    self.len_norm = len_norm
+    self.one_best = one_best
+    self.scores_proc = scores_proc
+
+  def is_prunable(self, score, bucket, presorted=False):
+    """ Returns True iff a hypothesis with score ``score'' has a chance to make
+    it into the top k of the hypothesis bin ``bucket''"""
+    if len(bucket) < self.beam_size:
+      return False
+
+    sorted_bucket = bucket if presorted else sorted(bucket, key=lambda hyp: hyp.score, reverse=True)
+    return score < sorted_bucket[self.beam_size - 1].score
+
+  def prune(self, hyps, bucket):
+    bucket = sorted(bucket, key=lambda hyp: hyp.score, reverse=True)
+    hyps = [hyp for hyp in hyps if not self.is_prunable(hyp.score, bucket, presorted=True)]
+    return hyps
+
+  def generate_output(self,
+                      translator: 'xnmt.models.translators.AutoRegressiveTranslator',
+                      initial_dec_state: decoders.DecoderState,
+                      initial_att_state: attenders.AttenderState,
+                      src_length: Optional[numbers.Integral] = None) -> List[SearchOutput]:
+    hyp_bins = defaultdict(lambda: defaultdict(list))
+    hyp_bins[0][0].append(self.Hypothesis(0, None, None, None))
+    completed_hyp = []
+
+    # Observation: No prefix can ever have more shifts than NTs (unless it's a complete hyp)
+    #for num_term_actions in range((self.max_len - 1) // 2):
+    #  for num_struct_actions in range((self.max_len + 1) // 2):
+    for num_struct_actions in range((self.max_len + 1) // 2):
+      for num_term_actions in range(num_struct_actions + 2):
+        print('Bin (%d, %d): %d hyps' % (num_term_actions, num_struct_actions, len(hyp_bins[num_term_actions][num_struct_actions])))
+        # This heuristic dropped us from 25.8479 BLEU down to 24.23 BLEU
+        if self.one_best and len(completed_hyp) > 0 and False:
+          best_complete_score = max([hyp.score for hyp in completed_hyp])
+          hyp_bins[num_term_actions][num_struct_actions] = [hyp for hyp in hyp_bins[num_term_actions][num_struct_actions] if hyp.score >= best_complete_score]
+        elif len(completed_hyp) >= self.beam_size:
+          # This branch drops us from 25.8479 to 25.7082.
+          # This combined with the one below got 25.6885 BLEU.
+          print('Completed scores: ' + str([hyp.score for hyp in completed_hyp]))
+          print('This bin: ' + str([hyp.score for hyp in hyp_bins[num_term_actions][num_struct_actions]]))
+          hyp_bins[num_term_actions][num_struct_actions] = self.prune(hyp_bins[num_term_actions][num_struct_actions], completed_hyp)
+          print('Pruned down to %d hyps' % (len(hyp_bins[num_term_actions][num_struct_actions])))
+
+        hyp_bins[num_term_actions][num_struct_actions] = sorted(hyp_bins[num_term_actions][num_struct_actions], key=lambda x: x.score, reverse=True)[:self.beam_size]
+        for hyp in hyp_bins[num_term_actions][num_struct_actions]:
+
+          # On German--English s2t these pruning criteria hurt BLEU only very slightly, from 25.8479 down to 25.8328.
+          if self.is_prunable(hyp.score, hyp_bins[num_term_actions + 1][num_struct_actions]) and self.is_prunable(hyp.score, hyp_bins[num_term_actions][num_struct_actions + 1]):
+            continue
+
+          if num_term_actions > 0 or num_struct_actions > 0:
+            prev_word = hyp.word
+            prev_dec_state = hyp.output.dec_state
+            prev_att_state = hyp.output.att_state
+          else:
+            prev_word = None
+            prev_dec_state = initial_dec_state
+            prev_att_state = initial_att_state
+
+          current_output = translator.add_input(prev_word, prev_dec_state, prev_att_state)
+          if current_output.dec_state.is_complete():
+            assert num_term_actions == num_struct_actions + 1
+            print('Complete hyp!')
+            completed_hyp.append(hyp)
+            continue
+          else:
+            assert num_term_actions < num_struct_actions + 1
+
+          print('Expanding hyp ' + str(hyp.word) + '\t' + str(hyp.score))
+          top_words, top_scores = translator.best_k(current_output, self.beam_size, normalize_scores=True)
+          for cur_word, score in zip(top_words, top_scores):
+            new_score = self.len_norm.normalize_partial_topk(hyp.score, score, num_term_actions + num_struct_actions + 1)
+            new_hyp = self.Hypothesis(new_score, current_output, hyp, cur_word)
+            if cur_word.action == vocabs.RnngVocab.SHIFT:
+              print('  -> ' + str(cur_word) + '\t' + str(score) + ' to bin (%d, %d)' % (num_term_actions + 1, num_struct_actions))
+              hyp_bins[num_term_actions + 1][num_struct_actions].append(new_hyp)
+            else:
+              print('  -> ' + str(cur_word) + '\t' + str(score) + ' to bin (%d, %d)' % (num_term_actions, num_struct_actions + 1))
+              hyp_bins[num_term_actions][num_struct_actions + 1].append(new_hyp)
+
+    # There is no hyp that reached </s>
+    if len(completed_hyp) == 0:
+      assert False
+
+    # Length Normalization
+    normalized_scores = self.len_norm.normalize_completed(completed_hyp, src_length)
+    hyp_and_score = sorted(list(zip(completed_hyp, normalized_scores)), key=lambda x: x[1], reverse=True)
+
+    # Take only the one best, if that's what was desired
+    if self.one_best:
+      hyp_and_score = hyp_and_score[:1]
+
+    # Backtracing + Packing outputs
+    results = []
+    for end_hyp, score in hyp_and_score:
+      logsoftmaxes = []
+      word_ids = []
+      attentions = []
+      states = []
+      current = end_hyp
+      while current.parent is not None:
+        word_ids.append(current.word)
+        attentions.append(current.output.attention)
+        states.append((current.output.dec_state, current.output.att_state))
+        current = current.parent
+      results.append(SearchOutput([list(reversed(word_ids))], [list(reversed(attentions))],
+                                  [score], list(reversed(logsoftmaxes)),
+                                  list(reversed(states)), [1 for _ in word_ids]))
+    return results
+
+class RnngBeamSearch(Serializable, SearchStrategy):
+  """
+  Performs beam search for RNNG output. See https://arxiv.org/pdf/1707.08976.pdf.
+  """
+
+  yaml_tag = '!RnngBeamSearch'
+  # Translator output contains dec state, att state, and attention
+  Hypothesis = namedtuple('Hypothesis', ['score', 'output', 'parent', 'word'])
+
+  @serializable_init
+  def __init__(self,
+               beam_size: numbers.Integral = 1,
+               max_len: numbers.Integral = 100,
+               len_norm: LengthNormalization = bare(NoNormalization),
+               one_best: bool = True,
+               scores_proc: Optional[Callable[[np.ndarray], None]] = None) -> None:
+    self.beam_size = beam_size
+    self.max_len = max_len
+    self.len_norm = len_norm
+    self.one_best = one_best
+    self.scores_proc = scores_proc
+
+  def generate_output(self,
+                      translator: 'xnmt.models.translators.AutoRegressiveTranslator',
+                      initial_dec_state: decoders.DecoderState,
+                      initial_att_state: attenders.AttenderState,
+                      src_length: Optional[numbers.Integral] = None) -> List[SearchOutput]:
+    # Normal beam search sorts hypotheses just by the current number of actions taken.
+    # This sorts hypotheses first by the number of _terminals_ produced so far, and then
+    # secondarily by the number of structure actions taken since the last shift.
+    # The search starts by looking at the (0, 0) bucket.
+    # At step (i, j), we take the top k next action for each hypothesis in the (i, j) bin.
+    # If the next action is a shift, the resulting hypotheis is added to the (i+1, 0) bin.
+    # Otherwise, the resultuing hypothesis is added to the (i, j+1) bin.
+
+    initial_output = translator.add_input(None, initial_dec_state, initial_att_state)
+    active_hyp = [self.Hypothesis(0, None, None, None)]
+    completed_hyp = []
+
+    for length in range(self.max_len):
+      if len(completed_hyp) >= self.beam_size:
+        completed_hyp = sorted(completed_hyp, key=lambda hyp: hyp.score, reverse=True)
+        completed_hyp = completed_hyp[:self.beam_size]
+        worst_complete_hyp_score = completed_hyp[-1].score
+        active_hyp = [hyp for hyp in active_hyp if hyp.score >= worst_complete_hyp_score]
+        # Assumption: each additional word will always *decrease* the total score.
+        if len(active_hyp) == 0:
+          break
+
+      # Expand hyp
+      #print('Clearing new shift set')
+      new_shift_set = []
+      for num_struct_actions in range(0, self.max_len - length + 1):
+        #print('Doing bucket (%d, %d) with %d active hyps' % (length, num_struct_actions, len(active_hyp)))
+        #for hyp in active_hyp:
+        #  print('  - ' + str(hyp.score) + '\t' + str(hyp.word))
+        fasttrack = (len(new_shift_set) == 0)
+        new_struct_set = []
+        for hyp in active_hyp:
+          if length > 0 or num_struct_actions > 0:
+            prev_word = hyp.word
+            prev_dec_state = hyp.output.dec_state
+            prev_att_state = hyp.output.att_state
+          else:
+            prev_word = None
+            prev_dec_state = initial_dec_state
+            prev_att_state = initial_att_state
+
+          current_output = translator.add_input(prev_word, prev_dec_state, prev_att_state)
+ 
+          if current_output.dec_state.is_complete():
+            #print('Completed hyp!')
+            completed_hyp.append(hyp)
+            continue
+
+          # Here we "fasttrack" the top few terminals directly into the (i+1, 0) bucket.
+          # This avoids the catastrophe that happens when the model may have only NTs in its k-best lists for many timesteps in a row
+          if fasttrack:
+            top_words, top_scores = translator.decoder.best_k(current_output.dec_state, self.beam_size, normalize_scores=True, shifts_only=True)
+            #print('Fast tracking %d words' % len(top_words))
+            for cur_word, score in zip(top_words, top_scores):
+              assert len(score.shape) == 0
+              new_score = self.len_norm.normalize_partial_topk(hyp.score, score, length + 1)
+              new_hyp = self.Hypothesis(new_score, current_output, hyp, cur_word)
+              #print('Fast tracking ' + str(score) + '\t' + str(cur_word))
+              new_shift_set.append(new_hyp)
+
+          top_words, top_scores = translator.best_k(current_output, self.beam_size, normalize_scores=True)
+          assert len(top_words) == len(top_scores)
+          assert len(top_words) > 0
+
+          for cur_word, score in zip(top_words, top_scores):
+            assert len(score.shape) == 0
+            if cur_word.action == vocabs.RnngVocab.SHIFT:
+              new_score = self.len_norm.normalize_partial_topk(hyp.score, score, length + 1)
+            else:
+              new_score = hyp.score + score
+            new_hyp = self.Hypothesis(new_score, current_output, hyp, cur_word)
+
+            #print(str(score) + '\t' + str(cur_word))
+            if cur_word.action == vocabs.RnngVocab.SHIFT:
+              if not fasttrack:
+                new_shift_set.append(new_hyp)
+              pass
+            else:
+              new_struct_set.append(new_hyp)
+
+        active_hyp = sorted(new_struct_set, key=lambda x: x.score, reverse=True)[:self.beam_size]
+
+        if len(new_shift_set) >= self.beam_size:
+          new_shift_set = sorted(new_shift_set, key=lambda x: x.score, reverse=True)[:self.beam_size]
+          assert len(new_shift_set) == self.beam_size
+          for i in range(len(active_hyp)):
+            if active_hyp[i].score < new_shift_set[-1].score:
+              #print('Active hyp #%d has score %f. Cannot catch up to %dth best shift action, which has a score of %f. %sing...' % (i, active_hyp[i].score, len(new_shift_set), new_shift_set[-1].score, 'Break' if i == 0 else 'Prun'))
+              active_hyp = active_hyp[:i]
+              break
+        if len(active_hyp) == 0:
+          break 
+
+      if len(new_shift_set) == 0:
+        assert len(completed_hyp) > 0
+      else:
+        assert len(new_shift_set) >= self.beam_size, 'Shift set only has %d candidates.' % len(new_shift_set)
+        active_hyp = sorted(new_shift_set, key=lambda x: x.score, reverse=True)[:self.beam_size]
 
     # There is no hyp that reached </s>
     if len(completed_hyp) == 0:
