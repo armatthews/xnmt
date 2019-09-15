@@ -1,3 +1,4 @@
+import sys
 import collections.abc
 from itertools import islice
 from typing import List, Optional, Tuple, Sequence, Union
@@ -48,7 +49,7 @@ class Inference(object):
                batcher: batchers.InOrderBatcher = bare(batchers.InOrderBatcher, batch_size=1),
                reporter: Union[None, reports.Reporter, Sequence[reports.Reporter]] = None) -> None:
     self.src_file = src_file
-    self.trg_file = trg_file
+    self.trg_file = trg_file 
     self.ref_file = ref_file
     self.max_src_len = max_src_len
     self.max_num_sents = max_num_sents
@@ -104,6 +105,7 @@ class Inference(object):
       if trg_file is not None:
         shutil.copyfile(ref_file, trg_file)
     else:
+      print('Writing hypotheses to ' + str(trg_file), file=sys.stderr)
       self._generate_output(generator=generator,
                             src_file=src_file, trg_file=trg_file, batcher=self.batcher,
                             max_src_len=self.max_src_len)
